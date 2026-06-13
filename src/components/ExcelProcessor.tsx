@@ -159,7 +159,71 @@ function findBestColumnMatch(
   }
 
   return undefined;
+
 }
+
+interface FormatColumn {
+  name: string;
+  key: string;
+  letter: string;
+  customValue?: (row: OutputRow) => string;
+}
+
+const NEW_FORMAT_COLS: FormatColumn[] = [
+  { name: "Mã nhóm hóa đơn *", key: "Mã nhóm hóa đơn", letter: "A" },
+  { name: "Ngày hóa đơn", key: "Ngày hóa đơn", letter: "B" },
+  { name: "Mã khách hàng", key: "Mã khách hàng", letter: "C" },
+  { name: "Mã số thuế", key: "Mã số thuế", letter: "D" },
+  { name: "Tên khách hàng", key: "Tên khách hàng", letter: "E" },
+  { name: "Họ tên người mua", key: "Họ tên người mua", letter: "F" },
+  { name: "Số CCCD", key: "Số CCCD", letter: "G" },
+  { name: "Địa chỉ", key: "Địa chỉ", letter: "H" },
+  { name: "Điện thoại", key: "Điện thoại", letter: "I" },
+  { name: "Email nhận HĐ", key: "Email nhận HĐ", letter: "J" },
+  { name: "Hình thức thanh toán", key: "Hình thức thanh toán", letter: "K" },
+  { name: "Tên ngân hàng", key: "Tên ngân hàng", letter: "L" },
+  { name: "Mã hàng", key: "Mã hàng", letter: "M" },
+  { name: "Tên hàng hóa, dịch vụ *", key: "Tên hàng hóa, dịch vụ *", letter: "N" },
+  { name: "Tính chất hàng hóa, dịch vụ", key: "Tính chất hàng hóa, dịch vụ", letter: "O" },
+  { name: "Đơn vị tính", key: "Đơn vị tính", letter: "P" },
+  { name: "Số lượng", key: "Số lượng", letter: "Q" },
+  { name: "Đơn giá", key: "Đơn giá", letter: "R" },
+  { name: "Chiết khấu (%)", key: "Chiết khấu (%)", letter: "S" },
+  { name: "Tiền chiết khấu", key: "Tiền chiết khấu", letter: "T" },
+  { name: "Thành tiền", key: "Thành tiền", letter: "U" },
+  { name: "% VAT", key: "% VAT", letter: "V" },
+  { name: "Tiền VAT", key: "Tiền VAT", letter: "W" },
+  { name: "Tổng tiền *", key: "Tổng tiền *", letter: "X" }
+];
+
+const OLD_FORMAT_COLS: FormatColumn[] = [
+  { name: "Số chứng từ hoặc mã bill *", key: "Mã nhóm hóa đơn", letter: "A" },
+  { name: "Ngày hóa đơn", key: "Ngày hóa đơn", letter: "B" },
+  { name: "Mã khách hàng", key: "Mã khách hàng", letter: "C" },
+  { name: "MST/MNS", key: "Mã số thuế", letter: "D" },
+  { name: "Tên đơn vị, tổ chức", key: "Tên khách hàng", letter: "E" },
+  { name: "Người mua hàng", key: "Họ tên người mua", letter: "F" },
+  { name: "Địa chỉ", key: "Địa chỉ", letter: "G" },
+  { name: "Số điện thoại", key: "Điện thoại", letter: "H" },
+  { name: "CCCD", key: "Số CCCD", letter: "I" },
+  { name: "Email nhận hóa đơn", key: "Email nhận HĐ", letter: "J" },
+  { name: "Hình thức thanh toán", key: "Hình thức thanh toán", letter: "K" },
+  { name: "Tài khoản ngân hàng", key: "Tên ngân hàng", letter: "L" },
+  { name: "Mã hàng hóa", key: "Mã hàng", letter: "M" },
+  { name: "Tên hàng hóa*", key: "Tên hàng hóa, dịch vụ *", letter: "N" },
+  { name: "Diễn giải (Đánh dấu X)", key: "diễn giải", letter: "O", customValue: () => "" },
+  { name: "Khuyến mại (Đánh dấu X)", key: "khuyến mại", letter: "P", customValue: () => "" },
+  { name: "CK thương mại (Đánh dấu X)", key: "ck thương mại", letter: "Q", customValue: (row: OutputRow) => row["Mã hàng"].startsWith("CKTM") ? "X" : "" },
+  { name: "Đơn vị tính", key: "Đơn vị tính", letter: "R" },
+  { name: "Số lượng", key: "Số lượng", letter: "S" },
+  { name: "Đơn giá", key: "Đơn giá", letter: "T" },
+  { name: "% Chiết khấu", key: "Chiết khấu (%)", letter: "U" },
+  { name: "Tiền chiết khấu", key: "Tiền chiết khấu", letter: "V" },
+  { name: "Thành tiền", key: "Thành tiền", letter: "W" },
+  { name: "% VAT", key: "% VAT", letter: "X" },
+  { name: "Tiền VAT", key: "Tiền VAT", letter: "Y" },
+  { name: "Tổng tiền*", key: "Tổng tiền *", letter: "Z" }
+];
 
 export default function ExcelProcessor({
   products,
@@ -171,6 +235,7 @@ export default function ExcelProcessor({
   setIsNegativeCKTM,
 }: ExcelProcessorProps) {
   const [outputData, setOutputData] = useState<OutputRow[]>([]);
+  const [exportFormat, setExportFormat] = useState<"new" | "old">("new");
   const [activeTab, setActiveTab] = useState<"upload" | "mapping" | "preview">("upload");
   const [processingLogs, setProcessingLogs] = useState<string[]>([]);
 
@@ -750,71 +815,136 @@ export default function ExcelProcessor({
       return;
     }
 
-    addLog("[Bước 3] Đang ghi xuất tệp tin Import Mau_import_hoa_don_GTGT...");
+    addLog(`[Bước 3] Đang ghi xuất tệp tin Import Mau_import_hoa_don_GTGT (${exportFormat === "new" ? "Định dạng mới" : "Định dạng cũ"})...`);
 
-    // Prepare sheet columns ensuring exact 24 columns in strict requested sequence
-    const cleanedRows = outputData.map((row) => ({
-      "Mã nhóm hóa đơn *": row["Mã nhóm hóa đơn"],
-      "Ngày hóa đơn": row["Ngày hóa đơn"],
-      "Mã khách hàng": row["Mã khách hàng"],
-      "Mã số thuế": row["Mã số thuế"],
-      "Tên khách hàng": row["Tên khách hàng"],
-      "Họ tên người mua": row["Họ tên người mua"],
-      "Số CCCD": row["Số CCCD"],
-      "Địa chỉ": row["Địa chỉ"],
-      "Điện thoại": row["Điện thoại"],
-      "Email nhận HĐ": row["Email nhận HĐ"],
-      "Hình thức thanh toán": row["Hình thức thanh toán"],
-      "Tên ngân hàng": row["Tên ngân hàng"],
-      "Mã hàng": row["Mã hàng"],
-      "Tên hàng hóa, dịch vụ *": row["Tên hàng hóa, dịch vụ *"],
-      "Tính chất hàng hóa, dịch vụ": row["Tính chất hàng hóa, dịch vụ"],
-      "Đơn vị tính": row["Đơn vị tính"],
-      "Số lượng": row["Số lượng"],
-      "Đơn giá": row["Đơn giá"],
-      "Chiết khấu (%)": row["Chiết khấu (%)"],
-      "Tiền chiết khấu": row["Tiền chiết khấu"],
-      "Thành tiền": row["Thành tiền"],
-      "% VAT": row["% VAT"],
-      "Tiền VAT": row["Tiền VAT"],
-      "Tổng tiền *": row["Tổng tiền *"],
-    }));
+    let cleanedRows: any[] = [];
+    let colWidths: { wch: number }[] = [];
+
+    if (exportFormat === "new") {
+      cleanedRows = outputData.map((row) => ({
+        "Mã nhóm hóa đơn *": row["Mã nhóm hóa đơn"],
+        "Ngày hóa đơn": row["Ngày hóa đơn"],
+        "Mã khách hàng": row["Mã khách hàng"],
+        "Mã số thuế": row["Mã số thuế"],
+        "Tên khách hàng": row["Tên khách hàng"],
+        "Họ tên người mua": row["Họ tên người mua"],
+        "Số CCCD": row["Số CCCD"],
+        "Địa chỉ": row["Địa chỉ"],
+        "Điện thoại": row["Điện thoại"],
+        "Email nhận HĐ": row["Email nhận HĐ"],
+        "Hình thức thanh toán": row["Hình thức thanh toán"],
+        "Tên ngân hàng": row["Tên ngân hàng"],
+        "Mã hàng": row["Mã hàng"],
+        "Tên hàng hóa, dịch vụ *": row["Tên hàng hóa, dịch vụ *"],
+        "Tính chất hàng hóa, dịch vụ": row["Tính chất hàng hóa, dịch vụ"],
+        "Đơn vị tính": row["Đơn vị tính"],
+        "Số lượng": row["Số lượng"],
+        "Đơn giá": row["Đơn giá"],
+        "Chiết khấu (%)": row["Chiết khấu (%)"],
+        "Tiền chiết khấu": row["Tiền chiết khấu"],
+        "Thành tiền": row["Thành tiền"],
+        "% VAT": row["% VAT"],
+        "Tiền VAT": row["Tiền VAT"],
+        "Tổng tiền *": row["Tổng tiền *"],
+      }));
+
+      colWidths = [
+        { wch: 18 }, // Mã nhóm hóa đơn *
+        { wch: 15 }, // Ngày hóa đơn
+        { wch: 15 }, // Mã khách hàng
+        { wch: 15 }, // Mã số thuế
+        { wch: 30 }, // Tên khách hàng
+        { wch: 20 }, // Họ tên người mua
+        { wch: 15 }, // Số CCCD
+        { wch: 25 }, // Địa chỉ
+        { wch: 15 }, // Điện thoại
+        { wch: 20 }, // Email nhận HĐ
+        { wch: 20 }, // Hình thức thanh toán
+        { wch: 15 }, // Tên ngân hàng
+        { wch: 15 }, // Mã hàng
+        { wch: 35 }, // Tên hàng hóa, dịch vụ *
+        { wch: 30 }, // Tính chất hàng hóa, dịch vụ
+        { wch: 15 }, // Đơn vị tính
+        { wch: 10 }, // Số lượng
+        { wch: 15 }, // Đơn giá
+        { wch: 15 }, // Chiết khấu (%)
+        { wch: 15 }, // Tiền chiết khấu
+        { wch: 15 }, // Thành tiền
+        { wch: 10 }, // % VAT
+        { wch: 15 }, // Tiền VAT
+        { wch: 18 }, // Tổng tiền *
+      ];
+    } else {
+      cleanedRows = outputData.map((row) => {
+        const isCKTM = row["Mã hàng"].startsWith("CKTM");
+        return {
+          "Số chứng từ hoặc mã bill *": row["Mã nhóm hóa đơn"],
+          "Ngày hóa đơn": row["Ngày hóa đơn"],
+          "Mã khách hàng": row["Mã khách hàng"],
+          "MST/MNS": row["Mã số thuế"],
+          "Tên đơn vị, tổ chức": row["Tên khách hàng"],
+          "Người mua hàng": row["Họ tên người mua"],
+          "Địa chỉ": row["Địa chỉ"],
+          "Số điện thoại": row["Điện thoại"],
+          "CCCD": row["Số CCCD"],
+          "Email nhận hóa đơn": row["Email nhận HĐ"],
+          "Hình thức thanh toán": row["Hình thức thanh toán"],
+          "Tài khoản ngân hàng": row["Tên ngân hàng"],
+          "Mã hàng hóa": row["Mã hàng"],
+          "Tên hàng hóa*": row["Tên hàng hóa, dịch vụ *"],
+          "Diễn giải (Đánh dấu X)": "",
+          "Khuyến mại (Đánh dấu X)": "",
+          "CK thương mại (Đánh dấu X)": isCKTM ? "X" : "",
+          "Đơn vị tính": row["Đơn vị tính"],
+          "Số lượng": row["Số lượng"],
+          "Đơn giá": row["Đơn giá"],
+          "% Chiết khấu": row["Chiết khấu (%)"],
+          "Tiền chiết khấu": row["Tiền chiết khấu"],
+          "Thành tiền": row["Thành tiền"],
+          "% VAT": row["% VAT"],
+          "Tiền VAT": row["Tiền VAT"],
+          "Tổng tiền*": row["Tổng tiền *"],
+        };
+      });
+
+      colWidths = [
+        { wch: 22 }, // Số chứng từ hoặc mã bill *
+        { wch: 15 }, // Ngày hóa đơn
+        { wch: 15 }, // Mã khách hàng
+        { wch: 15 }, // MST/MNS
+        { wch: 30 }, // Tên đơn vị, tổ chức
+        { wch: 20 }, // Người mua hàng
+        { wch: 25 }, // Địa chỉ
+        { wch: 15 }, // Số điện thoại
+        { wch: 15 }, // CCCD
+        { wch: 25 }, // Email nhận hóa đơn
+        { wch: 20 }, // Hình thức thanh toán
+        { wch: 15 }, // Tài khoản ngân hàng
+        { wch: 15 }, // Mã hàng hóa
+        { wch: 35 }, // Tên hàng hóa*
+        { wch: 20 }, // Diễn giải (Đánh dấu X)
+        { wch: 20 }, // Khuyến mại (Đánh dấu X)
+        { wch: 20 }, // CK thương mại (Đánh dấu X)
+        { wch: 15 }, // Đơn vị tính
+        { wch: 10 }, // Số lượng
+        { wch: 15 }, // Đơn giá
+        { wch: 15 }, // % Chiết khấu
+        { wch: 15 }, // Tiền chiết khấu
+        { wch: 15 }, // Thành tiền
+        { wch: 10 }, // % VAT
+        { wch: 15 }, // Tiền VAT
+        { wch: 18 }, // Tổng tiền*
+      ];
+    }
 
     const worksheet = XLSX.utils.json_to_sheet(cleanedRows);
     const workbook = XLSX.utils.book_new();
 
-    // Auto fit column widths for premium visual experience (24 columns total)
-    const colWidths = [
-      { wch: 18 }, // Mã nhóm hóa đơn *
-      { wch: 15 }, // Ngày hóa đơn
-      { wch: 15 }, // Mã khách hàng
-      { wch: 15 }, // Mã số thuế
-      { wch: 30 }, // Tên khách hàng
-      { wch: 20 }, // Họ tên người mua
-      { wch: 15 }, // Số CCCD
-      { wch: 25 }, // Địa chỉ
-      { wch: 15 }, // Điện thoại
-      { wch: 25 }, // Email nhận HĐ
-      { wch: 20 }, // Hình thức thanh toán
-      { wch: 15 }, // Tên ngân hàng
-      { wch: 15 }, // Mã hàng
-      { wch: 35 }, // Tên hàng hóa, dịch vụ *
-      { wch: 30 }, // Tính chất hàng hóa, dịch vụ
-      { wch: 15 }, // Đơn vị tính
-      { wch: 10 }, // Số lượng
-      { wch: 15 }, // Đơn giá
-      { wch: 15 }, // Chiết khấu (%)
-      { wch: 15 }, // Tiền chiết khấu
-      { wch: 15 }, // Thành tiền
-      { wch: 10 }, // % VAT
-      { wch: 15 }, // Tiền VAT
-      { wch: 18 }, // Tổng tiền *
-    ];
     worksheet["!cols"] = colWidths;
 
     XLSX.utils.book_append_sheet(workbook, worksheet, "Mau_import_hoa_don_GTGT");
     XLSX.writeFile(workbook, "Mau_import_hoa_don_GTGT.xlsx");
-    addLog("Xuất thành công tập tin Mau_import_hoa_don_GTGT.xlsx về máy tính của bạn!");
+    addLog(`Xuất thành công tập tin Mau_import_hoa_don_GTGT.xlsx (${exportFormat === "new" ? "định dạng mới" : "định dạng cũ"}) về máy tính!`);
   };
 
   const filteredSummaries = step2Stats?.invoiceTaxSummaries
@@ -1640,18 +1770,51 @@ export default function ExcelProcessor({
 
             {/* Right box: Execution actions */}
             <div className="lg:col-span-4 bg-slate-50/50 p-4 rounded-xl border border-slate-150 flex flex-col justify-between space-y-4">
-              <div className="space-y-2">
-                <div className="flex items-center space-x-2 pb-1 border-b border-slate-200">
-                  <Settings2 className="h-4.5 w-4.5 text-slate-600" />
-                  <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">Tiến Trình Chuyển Đổi</span>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <div className="flex items-center space-x-2 pb-1 border-b border-slate-200">
+                    <Settings2 className="h-4.5 w-4.5 text-slate-600" />
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">Tiến Trình Chuyển Đổi</span>
+                  </div>
+                  <div className="text-[11px] text-slate-600 space-y-2 leading-relaxed font-sans">
+                    <p>
+                      • Giá trị <strong>Tổng tiền</strong> của dòng Chiết khấu thương mại (CKTM) mặc định luôn luôn mang <strong>giá trị dương (+)</strong>.
+                    </p>
+                    <p>
+                      • Công thức Thành tiền dòng hóa đơn được tinh chỉnh tự động theo quy chuẩn: <code className="bg-slate-200/80 px-1 py-0.5 rounded text-indigo-700 font-mono text-[10px]">Thành tiền = (Giá trước thuế * Số lượng) - Tiền chiết khấu</code>.
+                    </p>
+                  </div>
                 </div>
-                <div className="text-[11px] text-slate-600 space-y-2 leading-relaxed font-sans">
-                  <p>
-                    • Giá trị <strong>Tổng tiền</strong> của dòng Chiết khấu thương mại (CKTM) mặc định luôn luôn mang <strong>giá trị dương (+)</strong>.
-                  </p>
-                  <p>
-                    • Công thức Thành tiền dòng hóa đơn được tinh chỉnh tự động theo quy chuẩn: <code className="bg-slate-200/80 px-1 py-0.5 rounded text-indigo-700 font-mono text-[10px]">Thành tiền = (Giá trước thuế * Số lượng) - Tiền chiết khấu</code>.
-                  </p>
+
+                {/* Export Format Selector Options */}
+                <div className="bg-white p-3 rounded-lg border border-slate-200 space-y-2 shadow-sm">
+                  <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">Cấu hình định dạng xuất bản (Import)</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setExportFormat("new")}
+                      className={`flex flex-col items-center justify-center p-2 rounded-lg border text-center transition cursor-pointer ${
+                        exportFormat === "new"
+                          ? "bg-blue-50 border-blue-500 text-blue-700 font-bold"
+                          : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      <span className="text-xs">Định dạng mới</span>
+                      <span className="text-[9px] opacity-70 mt-0.5">Mẫu 24 cột chuẩn</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExportFormat("old")}
+                      className={`flex flex-col items-center justify-center p-2 rounded-lg border text-center transition cursor-pointer ${
+                        exportFormat === "old"
+                          ? "bg-blue-50 border-blue-500 text-blue-700 font-bold"
+                          : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      <span className="text-xs">Định dạng cũ</span>
+                      <span className="text-[9px] opacity-70 mt-0.5">Mẫu 26 cột & CKTM</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1673,7 +1836,7 @@ export default function ExcelProcessor({
               <div className="border-b border-slate-200 bg-slate-50/50 px-5 py-3.5 flex items-center justify-between">
                 <div>
                   <span className="text-xs font-bold text-slate-700">Preview Layout File Import GTGT (Mau_import_hoa_don_GTGT.xlsx - {outputData.length} dòng)</span>
-                  <p className="text-[10px] text-slate-400 mt-0.5">Bảng hiển thị đầy đủ 24 cột chuẩn của tệp ánh xạ đấu nối cùng ký tự Alphabet nhận dạng từ A-X.</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Bảng hiển thị đầy đủ {exportFormat === "new" ? "24" : "26"} cột chuẩn của tệp ánh xạ đấu nối cùng ký tự Alphabet nhận dạng từ A-{exportFormat === "new" ? "X" : "Z"}.</p>
                 </div>
                 
                 <button
@@ -1690,32 +1853,7 @@ export default function ExcelProcessor({
                 <table className="min-w-[2400px] text-left text-[11px] text-slate-600 divide-y divide-slate-200">
                   <thead className="bg-[#f8fafc] sticky top-0 font-semibold text-slate-700 border-b border-slate-200 z-10">
                     <tr className="border-b border-slate-100 bg-slate-50">
-                      {[
-                        { name: "Mã nhóm hóa đơn *", letter: "A", key: "Mã nhóm hóa đơn" },
-                        { name: "Ngày hóa đơn", letter: "B", key: "Ngày hóa đơn" },
-                        { name: "Mã khách hàng", letter: "C", key: "Mã khách hàng" },
-                        { name: "Mã số thuế", letter: "D", key: "Mã số thuế" },
-                        { name: "Tên khách hàng", letter: "E", key: "Tên khách hàng" },
-                        { name: "Họ tên người mua", letter: "F", key: "Họ tên người mua" },
-                        { name: "Số CCCD", letter: "G", key: "Số CCCD" },
-                        { name: "Địa chỉ", letter: "H", key: "Địa chỉ" },
-                        { name: "Điện thoại", letter: "I", key: "Điện thoại" },
-                        { name: "Email nhận HĐ", letter: "J", key: "Email nhận HĐ" },
-                        { name: "Hình thức thanh toán", letter: "K", key: "Hình thức thanh toán" },
-                        { name: "Tên ngân hàng", letter: "L", key: "Tên ngân hàng" },
-                        { name: "Mã hàng", letter: "M", key: "Mã hàng" },
-                        { name: "Tên hàng hóa, dịch vụ *", letter: "N", key: "Tên hàng hóa, dịch vụ *" },
-                        { name: "Tính chất hàng hóa, dịch vụ", letter: "O", key: "Tính chất hàng hóa, dịch vụ" },
-                        { name: "Đơn vị tính", letter: "P", key: "Đơn vị tính" },
-                        { name: "Số lượng", letter: "Q", key: "Số lượng" },
-                        { name: "Đơn giá", letter: "R", key: "Đơn giá" },
-                        { name: "Chiết khấu (%)", letter: "S", key: "Chiết khấu (%)" },
-                        { name: "Tiền chiết khấu", letter: "T", key: "Tiền chiết khấu" },
-                        { name: "Thành tiền", letter: "U", key: "Thành tiền" },
-                        { name: "% VAT", letter: "V", key: "% VAT" },
-                        { name: "Tiền VAT", letter: "W", key: "Tiền VAT" },
-                        { name: "Tổng tiền *", letter: "X", key: "Tổng tiền *" }
-                      ].map((h, i) => (
+                      {(exportFormat === "new" ? NEW_FORMAT_COLS : OLD_FORMAT_COLS).map((h, i) => (
                         <th key={i} className="py-2 px-3 border-r border-slate-200/60 last:border-0 truncate" style={{ minWidth: i === 4 || i === 13 ? '220px' : i === 0 || i === 7 ? '180px' : '110px' }}>
                           <span className="inline-block px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded text-blue-700 font-mono font-extrabold text-[10px] mb-1">
                             {h.letter}
@@ -1728,33 +1866,7 @@ export default function ExcelProcessor({
                   <tbody className="divide-y font-mono">
                     {outputData.map((row, idx) => {
                       const isCKTM = row["Mã hàng"].startsWith("CKTM");
-                      
-                      const rowKeys: (keyof OutputRow)[] = [
-                        "Mã nhóm hóa đơn",
-                        "Ngày hóa đơn",
-                        "Mã khách hàng",
-                        "Mã số thuế",
-                        "Tên khách hàng",
-                        "Họ tên người mua",
-                        "Số CCCD",
-                        "Địa chỉ",
-                        "Điện thoại",
-                        "Email nhận HĐ",
-                        "Hình thức thanh toán",
-                        "Tên ngân hàng",
-                        "Mã hàng",
-                        "Tên hàng hóa, dịch vụ *",
-                        "Tính chất hàng hóa, dịch vụ",
-                        "Đơn vị tính",
-                        "Số lượng",
-                        "Đơn giá",
-                        "Chiết khấu (%)",
-                        "Tiền chiết khấu",
-                        "Thành tiền",
-                        "% VAT",
-                        "Tiền VAT",
-                        "Tổng tiền *"
-                      ];
+                      const currentCols = exportFormat === "new" ? NEW_FORMAT_COLS : OLD_FORMAT_COLS;
 
                       return (
                         <tr 
@@ -1765,11 +1877,12 @@ export default function ExcelProcessor({
                             row["Ngày hóa đơn"] ? "border-t-2 border-slate-250 font-bold bg-slate-50/25" : ""
                           }`}
                         >
-                          {rowKeys.map((k, colIdx) => {
-                            const val = row[k];
+                          {currentCols.map((col, colIdx) => {
+                            const val = col.customValue ? col.customValue(row) : row[col.key as keyof OutputRow];
+                            const k = col.key;
                             let content: React.ReactNode = "-";
                             let cellClass = "py-1.5 px-3 text-slate-700 border-r border-slate-100/60 last:border-r-0 truncate";
-
+ 
                             if (val !== undefined && val !== null && val !== "") {
                               if (["Đơn giá", "Tiền chiết khấu", "Thành tiền", "Tiền VAT", "Tổng tiền *"].includes(k)) {
                                 const num = Number(val);
@@ -1796,7 +1909,7 @@ export default function ExcelProcessor({
                                 }
                               }
                             }
-
+ 
                             return (
                               <td key={colIdx} className={cellClass} title={String(val || "")}>
                                 {content}

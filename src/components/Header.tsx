@@ -20,15 +20,12 @@ export default function Header({ activeTab, setActiveTab, productsCount, invoice
         <div className="flex justify-between h-16 items-center">
           {/* Logo & Name */}
           <div className="flex items-center space-x-3.5">
-            <div className="w-8 h-8 bg-blue-500 rounded flex items-center justify-center font-bold text-xs text-white shadow-md">
-              PD
+            <div className="w-10 h-10 bg-blue-500 rounded flex items-center justify-center font-bold text-[11px] text-white shadow-md">
+              KVE
             </div>
             <div>
               <h1 className="font-semibold text-white text-base flex items-center tracking-tight">
-                <span>DataMapper Pro</span>
-                <span className="text-slate-400 font-normal text-xs ml-2 hidden sm:inline">
-                  / Accounting ETL Pipeline
-                </span>
+                <span>Convert Tool KVE</span>
               </h1>
               <p className="text-[11px] text-slate-400 leading-none mt-1">
                 Tự động hóa chuẩn hóa &amp; phân bổ chiết khấu thương mại hóa đơn GTGT v2.1
@@ -58,30 +55,6 @@ export default function Header({ activeTab, setActiveTab, productsCount, invoice
                 {(productsCount > 0 || invoicesCount > 0) && (
                   <span className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
                 )}
-              </button>
-
-              <button
-                onClick={() => setActiveTab("python")}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded text-xs transition duration-200 cursor-pointer ${
-                  activeTab === "python"
-                    ? "bg-blue-600 text-white shadow-sm font-semibold"
-                    : "text-slate-300 hover:text-white"
-                }`}
-              >
-                <Layers className="h-3.5 w-3.5" />
-                <span>Python Code</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab("qa")}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded text-xs transition duration-200 cursor-pointer ${
-                  activeTab === "qa"
-                    ? "bg-blue-600 text-white shadow-sm font-semibold"
-                    : "text-slate-300 hover:text-white"
-                }`}
-              >
-                <BookOpen className="h-3.5 w-3.5" />
-                <span>Báo Cáo & Thuế</span>
               </button>
             </div>
           </div>

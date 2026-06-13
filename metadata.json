@@ -1,5 +1,5 @@
 {
-  "name": "Sales Accounting Data Mapper",
+  "name": "Convert Tool KVE",
   "description": "Công cụ ánh xạ, làm giàu và chuyển đổi dữ liệu kế toán bán hàng tự động theo chuẩn mẫu hóa đơn GTGT.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
