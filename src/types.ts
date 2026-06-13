@@ -4,7 +4,7 @@
  */
 
 export interface ProductCatalogRow {
-  "Mã hàng": string;
+  "Mã món": string;
   "Thuế bán hàng": number; // decimal e.g., 0.08 or 0.10
   [key: string]: any;
 }
@@ -21,7 +21,9 @@ export interface InvoiceDetailRow {
 }
 
 export interface OutputRow {
+  "Mã nhóm hóa đơn": string;
   "Ngày hóa đơn": string;
+  "Mã khách hàng": string;
   "Mã số thuế": string;
   "Tên khách hàng": string;
   "Họ tên người mua": string;
@@ -34,15 +36,15 @@ export interface OutputRow {
   "Mã hàng": string;
   "Tên hàng hóa, dịch vụ *": string;
   "Tính chất hàng hóa, dịch vụ": string;
+  "Đơn vị tính": string;
   "Số lượng": string | number;
-  "Đơn giá": number;
+  "Đơn giá": number | string;
   "Chiết khấu (%)": number;
-  "Tiền chiết khấu": string;
-  "Thành tiền": number;
+  "Tiền chiết khấu": string | number;
+  "Thành tiền": number | string;
   "% VAT": string | number;
-  "Tiền VAT": string;
+  "Tiền VAT": string | number;
   "Tổng tiền *": number;
-  "Mã nhóm hóa đơn": string; // Internal grouping helper
 }
 
 export type ThanhTienFormula = 

@@ -16,7 +16,7 @@ export default function App() {
   const [invoices, setInvoices] = useState<InvoiceDetailRow[]>([]);
   const [activeTab, setActiveTab] = useState<string>("processor");
   const [formula, setFormula] = useState<ThanhTienFormula>("standard_accounting");
-  const [isNegativeCKTM, setIsNegativeCKTM] = useState<boolean>(true);
+  const [isNegativeCKTM, setIsNegativeCKTM] = useState<boolean>(false);
 
   const handleDataChange = (prodList: ProductCatalogRow[], invList: InvoiceDetailRow[]) => {
     setProducts(prodList);
