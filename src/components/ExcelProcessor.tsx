@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { 
   FileSpreadsheet, 
   Upload, 
@@ -16,7 +16,9 @@ import {
   Check, 
   AlertTriangle,
   Flame,
-  HelpCircle
+  HelpCircle,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { ProductCatalogRow, InvoiceDetailRow, OutputRow, ThanhTienFormula, ColumnMapping } from "../types";
@@ -212,7 +214,7 @@ const OLD_FORMAT_COLS: FormatColumn[] = [
   { name: "Mã hàng hóa", key: "Mã hàng", letter: "M" },
   { name: "Tên hàng hóa*", key: "Tên hàng hóa, dịch vụ *", letter: "N" },
   { name: "Diễn giải (Đánh dấu X)", key: "diễn giải", letter: "O", customValue: () => "" },
-  { name: "Khuyến mại (Đánh dấu X)", key: "khuyến mại", letter: "P", customValue: () => "" },
+  { name: "Khuyến mại (Đánh dấu X)", key: "khuyến mại", letter: "P", customValue: (row: OutputRow) => row["Tính chất hàng hóa, dịch vụ"] === "Hàng hóa khuyến mại" ? "X" : "" },
   { name: "CK thương mại (Đánh dấu X)", key: "ck thương mại", letter: "Q", customValue: (row: OutputRow) => row["Mã hàng"].startsWith("CKTM") ? "X" : "" },
   { name: "Đơn vị tính", key: "Đơn vị tính", letter: "R" },
   { name: "Số lượng", key: "Số lượng", letter: "S" },
@@ -241,7 +243,7 @@ export default function ExcelProcessor({
 
   // NEW: Step-by-step state management
   const [activeStepTab, setActiveStepTab] = useState<"step1" | "step2" | "step3">("step1");
-  const [activeStep2SubTab, setActiveStep2SubTab] = useState<"step2_1" | "step2_2">("step2_1");
+  const [activeStep2SubTab, setActiveStep2SubTab] = useState<"step2_1" | "step2_2">("step2_2");
   const [step2Invoices, setStep2Invoices] = useState<any[]>([]);
   const [step2Processed, setStep2Processed] = useState<boolean>(false);
 
@@ -249,11 +251,19 @@ export default function ExcelProcessor({
     taxRates: number[];
     hasInvoiceDiscount: boolean;
     totalInvoicesCount: number;
-    invoiceTaxSummaries: { invoiceId: string; itemCount: number; taxRates: number[]; taxCount: number }[];
+    hasPromotion: boolean;
+    totalZeroPriceCount: number;
+    invoiceTaxSummaries: { invoiceId: string; itemCount: number; taxRates: number[]; taxCount: number; zeroPriceCount: number }[];
   } | null>(null);
   const [step3Processed, setStep3Processed] = useState<boolean>(false);
   const [step2SearchQuery, setStep2SearchQuery] = useState("");
   const [step2Page, setStep2Page] = useState(1);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [showDiagnostic, setShowDiagnostic] = useState<boolean>(false);
+  const [showStep2Preview, setShowStep2Preview] = useState<boolean>(false);
+  const [showMapping, setShowMapping] = useState<boolean>(false);
+  const [showLogs, setShowLogs] = useState<boolean>(false);
+  const ROWS_PER_PAGE = 50;
   
   // Custom manual mappings if headers differ from standard
   const [colMapping, setColMapping] = useState<ColumnMapping>({
@@ -267,6 +277,10 @@ export default function ExcelProcessor({
     invoiceDiscountPercentCol: "Giảm giá %",
     invoiceDiscountAmountCol: "Giảm giá hóa đơn",
   });
+
+  // Dynamic override mappings for each of the Output Excel columns
+  const [customExportMapping, setCustomExportMapping] = useState<Record<string, string>>({});
+  const [searchOutputColQuery, setSearchOutputColQuery] = useState("");
 
   const [availableCatalogCols, setAvailableCatalogCols] = useState<string[]>([]);
   const [availableInvoiceCols, setAvailableInvoiceCols] = useState<string[]>([]);
@@ -552,18 +566,24 @@ export default function ExcelProcessor({
     );
     const totalInvoicesCount = uniqueInvoiceIds.length;
 
-    // Calculate the number of tax levels for each unique invoice
-    const invoiceTaxDetails: Record<string, { itemCount: number; taxRates: Set<number> }> = {};
+    // Calculate the number of tax levels and zero-price items for each unique invoice
+    const invoiceTaxDetails: Record<string, { itemCount: number; taxRates: Set<number>; zeroPriceCount: number }> = {};
     enriched.forEach((item) => {
       const invId = String(getValueByFlexibleKey(item, colMapping.invoiceIdCol) || "").trim();
       if (!invId) return;
       const taxRate = item["Thuế bán hàng"] !== undefined ? item["Thuế bán hàng"] : 0.08;
 
+      const rawPrice = getValueByFlexibleKey(item, colMapping.invoicePriceCol);
+      const isZeroPrice = parseVietnameseNumber(rawPrice) === 0;
+
       if (!invoiceTaxDetails[invId]) {
-        invoiceTaxDetails[invId] = { itemCount: 0, taxRates: new Set<number>() };
+        invoiceTaxDetails[invId] = { itemCount: 0, taxRates: new Set<number>(), zeroPriceCount: 0 };
       }
       invoiceTaxDetails[invId].itemCount += 1;
       invoiceTaxDetails[invId].taxRates.add(taxRate);
+      if (isZeroPrice) {
+        invoiceTaxDetails[invId].zeroPriceCount += 1;
+      }
     });
 
     const invoiceTaxSummaries = Object.entries(invoiceTaxDetails).map(([invId, data]) => ({
@@ -571,13 +591,22 @@ export default function ExcelProcessor({
       itemCount: data.itemCount,
       taxRates: Array.from(data.taxRates).sort((a, b) => a - b),
       taxCount: data.taxRates.size,
+      zeroPriceCount: data.zeroPriceCount,
     }));
+
+    const totalZeroPriceCount = enriched.filter((item) => {
+      const rawPrice = getValueByFlexibleKey(item, colMapping.invoicePriceCol);
+      return parseVietnameseNumber(rawPrice) === 0;
+    }).length;
+    const hasPromotion = totalZeroPriceCount > 0;
 
     setStep2Invoices(enriched);
     setStep2Stats({
       taxRates: uniqueTaxes,
       hasInvoiceDiscount: hasDiscount,
       totalInvoicesCount,
+      hasPromotion,
+      totalZeroPriceCount,
       invoiceTaxSummaries,
     });
     setStep2Processed(true);
@@ -697,32 +726,80 @@ export default function ExcelProcessor({
 
         const mappedTaxStr = `${Math.round(taxRate * 100)}%`;
 
-        const outRow: OutputRow = {
-          "Mã nhóm hóa đơn": invId,
-          "Ngày hóa đơn": isFirstRowOfGroup ? currentDateStr : "",
-          "Mã khách hàng": isFirstRowOfGroup ? "KL" : "",
-          "Mã số thuế": "",
-          "Tên khách hàng": isFirstRowOfGroup ? "Khách lẻ không lấy hóa đơn" : "",
-          "Họ tên người mua": "",
-          "Số CCCD": "",
-          "Địa chỉ": "",
-          "Điện thoại": "",
-          "Email nhận HĐ": "",
-          "Hình thức thanh toán": isFirstRowOfGroup ? "TM/CK" : "",
-          "Tên ngân hàng": "",
-          "Mã hàng": itemCode,
-          "Tên hàng hóa, dịch vụ *": itemName,
-          "Tính chất hàng hóa, dịch vụ": "Hàng hóa, dịch vụ",
-          "Đơn vị tính": "",
-          "Số lượng": qty,
-          "Đơn giá": giaTruocThue,
-          "Chiết khấu (%)": discountPercent,
-          "Tiền chiết khấu": tChietKhau > 0 ? tChietKhau : "",
-          "Thành tiền": thanhTien,
-          "% VAT": mappedTaxStr,
-          "Tiền VAT": tVat > 0 ? tVat : "",
-          "Tổng tiền *": totalRowAmount,
-        };
+        const rawPriceVal = getValueByFlexibleKey(item, colMapping.invoicePriceCol);
+        const isItemZeroPrice = parseVietnameseNumber(rawPriceVal) === 0;
+
+        const activeCols = exportFormat === "new" ? NEW_FORMAT_COLS : OLD_FORMAT_COLS;
+        const outRow: OutputRow = {} as any;
+        
+        activeCols.forEach((col) => {
+          let defaultVal: any = "";
+          const letter = col.letter;
+          const isNew = exportFormat === "new";
+
+          if (letter === "A") {
+            defaultVal = invId;
+          } else if (letter === "B") {
+            defaultVal = isFirstRowOfGroup ? currentDateStr : "";
+          } else if (letter === "C") {
+            defaultVal = "";
+          } else if (letter === "D") {
+            defaultVal = "";
+          } else if (letter === "E") {
+            defaultVal = isFirstRowOfGroup ? "Khách lẻ không lấy hóa đơn" : "";
+          } else if (letter === "F") {
+            defaultVal = "";
+          } else if (letter === "G") {
+            defaultVal = "";
+          } else if (letter === "H") {
+            defaultVal = "";
+          } else if (letter === "I") {
+            defaultVal = "";
+          } else if (letter === "J") {
+            defaultVal = "";
+          } else if (letter === "K") {
+            defaultVal = isFirstRowOfGroup ? "TM/CK" : "";
+          } else if (letter === "L") {
+            defaultVal = "";
+          } else if (letter === "M") {
+            defaultVal = itemCode;
+          } else if (letter === "N") {
+            defaultVal = itemName;
+          } else if (isNew) {
+            if (letter === "O") defaultVal = isItemZeroPrice ? "Hàng hóa khuyến mại" : "Hàng hóa, dịch vụ";
+            else if (letter === "P") defaultVal = "";
+            else if (letter === "Q") defaultVal = qty;
+            else if (letter === "R") defaultVal = giaTruocThue;
+            else if (letter === "S") defaultVal = discountPercent;
+            else if (letter === "T") defaultVal = tChietKhau > 0 ? tChietKhau : "";
+            else if (letter === "U") defaultVal = thanhTien;
+            else if (letter === "V") defaultVal = mappedTaxStr;
+            else if (letter === "W") defaultVal = tVat > 0 ? tVat : "";
+            else if (letter === "X") defaultVal = totalRowAmount;
+          } else {
+            if (letter === "O") defaultVal = "";
+            else if (letter === "P") defaultVal = isItemZeroPrice ? "X" : "";
+            else if (letter === "Q") defaultVal = itemCode.startsWith("CKTM") ? "X" : "";
+            else if (letter === "R") defaultVal = "";
+            else if (letter === "S") defaultVal = qty;
+            else if (letter === "T") defaultVal = giaTruocThue;
+            else if (letter === "U") defaultVal = discountPercent;
+            else if (letter === "V") defaultVal = tChietKhau > 0 ? tChietKhau : "";
+            else if (letter === "W") defaultVal = thanhTien;
+            else if (letter === "X") defaultVal = mappedTaxStr;
+            else if (letter === "Y") defaultVal = tVat > 0 ? tVat : "";
+            else if (letter === "Z") defaultVal = totalRowAmount;
+          }
+
+          // If user mapped a custom column from step 2 for this target output column, use it!
+          const mappedSourceCol = customExportMapping[col.name];
+          if (mappedSourceCol && mappedSourceCol !== "__default__") {
+            const rawVal = getValueByFlexibleKey(item, mappedSourceCol);
+            (outRow as any)[col.key] = rawVal !== undefined && rawVal !== null ? rawVal : "";
+          } else {
+            (outRow as any)[col.key] = defaultVal;
+          }
+        });
 
         tempGroupOutputRows.push(outRow);
         isFirstRowOfGroup = false;
@@ -803,148 +880,77 @@ export default function ExcelProcessor({
     });
 
     setOutputData(finalRows);
+    setPreviewPage(1);
     setStep3Processed(true);
     addLog(`[Bước 3] Hoàn thành ánh xạ! Đã gộp và tạo thành công ${finalRows.length} dòng dữ liệu.`);
     setActiveStepTab("step3");
   };
 
-  // Export processed data to standard Excel file
-  const handleExport = () => {
+  // Export processed data using custom-uploaded templates
+  const handleExport = async () => {
     if (outputData.length === 0) {
       alert("Không có dữ liệu đầu ra để xuất bản! Vui lòng hoàn thành các bước trước.");
       return;
     }
 
-    addLog(`[Bước 3] Đang ghi xuất tệp tin Import Mau_import_hoa_don_GTGT (${exportFormat === "new" ? "Định dạng mới" : "Định dạng cũ"})...`);
+    try {
+      const isNew = exportFormat === "new";
+      addLog(`[Bước 3] Đang tải file mẫu thiết kế ${isNew ? "định dạng mới (Mẫu import)" : "định dạng cũ (Dữ liệu HĐ MTT)"}...`);
 
-    let cleanedRows: any[] = [];
-    let colWidths: { wch: number }[] = [];
+      const fileUrl = isNew ? "/Mau_moi.xlsx" : "/Mau_cu.xlsx";
+      const sheetName = isNew ? "Mẫu import" : "Dữ liệu HĐ MTT";
+      const startRowIndex = isNew ? 4 : 5; // index starts at 4 (Row 5) or 5 (Row 6)
 
-    if (exportFormat === "new") {
-      cleanedRows = outputData.map((row) => ({
-        "Mã nhóm hóa đơn *": row["Mã nhóm hóa đơn"],
-        "Ngày hóa đơn": row["Ngày hóa đơn"],
-        "Mã khách hàng": row["Mã khách hàng"],
-        "Mã số thuế": row["Mã số thuế"],
-        "Tên khách hàng": row["Tên khách hàng"],
-        "Họ tên người mua": row["Họ tên người mua"],
-        "Số CCCD": row["Số CCCD"],
-        "Địa chỉ": row["Địa chỉ"],
-        "Điện thoại": row["Điện thoại"],
-        "Email nhận HĐ": row["Email nhận HĐ"],
-        "Hình thức thanh toán": row["Hình thức thanh toán"],
-        "Tên ngân hàng": row["Tên ngân hàng"],
-        "Mã hàng": row["Mã hàng"],
-        "Tên hàng hóa, dịch vụ *": row["Tên hàng hóa, dịch vụ *"],
-        "Tính chất hàng hóa, dịch vụ": row["Tính chất hàng hóa, dịch vụ"],
-        "Đơn vị tính": row["Đơn vị tính"],
-        "Số lượng": row["Số lượng"],
-        "Đơn giá": row["Đơn giá"],
-        "Chiết khấu (%)": row["Chiết khấu (%)"],
-        "Tiền chiết khấu": row["Tiền chiết khấu"],
-        "Thành tiền": row["Thành tiền"],
-        "% VAT": row["% VAT"],
-        "Tiền VAT": row["Tiền VAT"],
-        "Tổng tiền *": row["Tổng tiền *"],
-      }));
+      const response = await fetch(fileUrl);
+      if (!response.ok) {
+        throw new Error(`Không thể nạp tệp mẫu tại đường dẫn ${fileUrl}.`);
+      }
 
-      colWidths = [
-        { wch: 18 }, // Mã nhóm hóa đơn *
-        { wch: 15 }, // Ngày hóa đơn
-        { wch: 15 }, // Mã khách hàng
-        { wch: 15 }, // Mã số thuế
-        { wch: 30 }, // Tên khách hàng
-        { wch: 20 }, // Họ tên người mua
-        { wch: 15 }, // Số CCCD
-        { wch: 25 }, // Địa chỉ
-        { wch: 15 }, // Điện thoại
-        { wch: 20 }, // Email nhận HĐ
-        { wch: 20 }, // Hình thức thanh toán
-        { wch: 15 }, // Tên ngân hàng
-        { wch: 15 }, // Mã hàng
-        { wch: 35 }, // Tên hàng hóa, dịch vụ *
-        { wch: 30 }, // Tính chất hàng hóa, dịch vụ
-        { wch: 15 }, // Đơn vị tính
-        { wch: 10 }, // Số lượng
-        { wch: 15 }, // Đơn giá
-        { wch: 15 }, // Chiết khấu (%)
-        { wch: 15 }, // Tiền chiết khấu
-        { wch: 15 }, // Thành tiền
-        { wch: 10 }, // % VAT
-        { wch: 15 }, // Tiền VAT
-        { wch: 18 }, // Tổng tiền *
-      ];
-    } else {
-      cleanedRows = outputData.map((row) => {
-        const isCKTM = row["Mã hàng"].startsWith("CKTM");
-        return {
-          "Số chứng từ hoặc mã bill *": row["Mã nhóm hóa đơn"],
-          "Ngày hóa đơn": row["Ngày hóa đơn"],
-          "Mã khách hàng": row["Mã khách hàng"],
-          "MST/MNS": row["Mã số thuế"],
-          "Tên đơn vị, tổ chức": row["Tên khách hàng"],
-          "Người mua hàng": row["Họ tên người mua"],
-          "Địa chỉ": row["Địa chỉ"],
-          "Số điện thoại": row["Điện thoại"],
-          "CCCD": row["Số CCCD"],
-          "Email nhận hóa đơn": row["Email nhận HĐ"],
-          "Hình thức thanh toán": row["Hình thức thanh toán"],
-          "Tài khoản ngân hàng": row["Tên ngân hàng"],
-          "Mã hàng hóa": row["Mã hàng"],
-          "Tên hàng hóa*": row["Tên hàng hóa, dịch vụ *"],
-          "Diễn giải (Đánh dấu X)": "",
-          "Khuyến mại (Đánh dấu X)": "",
-          "CK thương mại (Đánh dấu X)": isCKTM ? "X" : "",
-          "Đơn vị tính": row["Đơn vị tính"],
-          "Số lượng": row["Số lượng"],
-          "Đơn giá": row["Đơn giá"],
-          "% Chiết khấu": row["Chiết khấu (%)"],
-          "Tiền chiết khấu": row["Tiền chiết khấu"],
-          "Thành tiền": row["Thành tiền"],
-          "% VAT": row["% VAT"],
-          "Tiền VAT": row["Tiền VAT"],
-          "Tổng tiền*": row["Tổng tiền *"],
-        };
+      const arrayBuffer = await response.arrayBuffer();
+      const workbook = XLSX.read(new Uint8Array(arrayBuffer), { type: "array" });
+
+      const worksheet = workbook.Sheets[sheetName];
+      if (!worksheet) {
+        throw new Error(`Không tìm thấy sheet "${sheetName}" trong tệp tin mẫu.`);
+      }
+
+      // Map output rows to exact column orders in templates dynamically respecting any custom user mapping and customValue fallbacks
+      const colsInFormat = isNew ? NEW_FORMAT_COLS : OLD_FORMAT_COLS;
+      let rawData: any[][] = [];
+      rawData = outputData.map((row) => {
+        return colsInFormat.map((col) => {
+          const hasOverride = customExportMapping[col.name] !== undefined && customExportMapping[col.name] !== "__default__";
+          if (col.customValue && !hasOverride) {
+            return col.customValue(row);
+          }
+          const val = row[col.key as keyof OutputRow];
+          
+          // Format numeric columns to real Excel numbers
+          if (["Số lượng", "Đơn giá", "Thành tiền", "Tiền VAT", "Tổng tiền *", "Tiền chiết khấu", "Chiết khấu (%)"].includes(col.key)) {
+            if (val !== undefined && val !== null && val !== "") {
+              const num = Number(val);
+              if (!isNaN(num)) return num;
+            }
+          }
+          return val !== undefined && val !== null ? val : "";
+        });
       });
 
-      colWidths = [
-        { wch: 22 }, // Số chứng từ hoặc mã bill *
-        { wch: 15 }, // Ngày hóa đơn
-        { wch: 15 }, // Mã khách hàng
-        { wch: 15 }, // MST/MNS
-        { wch: 30 }, // Tên đơn vị, tổ chức
-        { wch: 20 }, // Người mua hàng
-        { wch: 25 }, // Địa chỉ
-        { wch: 15 }, // Số điện thoại
-        { wch: 15 }, // CCCD
-        { wch: 25 }, // Email nhận hóa đơn
-        { wch: 20 }, // Hình thức thanh toán
-        { wch: 15 }, // Tài khoản ngân hàng
-        { wch: 15 }, // Mã hàng hóa
-        { wch: 35 }, // Tên hàng hóa*
-        { wch: 20 }, // Diễn giải (Đánh dấu X)
-        { wch: 20 }, // Khuyến mại (Đánh dấu X)
-        { wch: 20 }, // CK thương mại (Đánh dấu X)
-        { wch: 15 }, // Đơn vị tính
-        { wch: 10 }, // Số lượng
-        { wch: 15 }, // Đơn giá
-        { wch: 15 }, // % Chiết khấu
-        { wch: 15 }, // Tiền chiết khấu
-        { wch: 15 }, // Thành tiền
-        { wch: 10 }, // % VAT
-        { wch: 15 }, // Tiền VAT
-        { wch: 18 }, // Tổng tiền*
-      ];
+      // Overwrite/Append into the existing template worksheet at startRowIndex
+      XLSX.utils.sheet_add_aoa(worksheet, rawData, { origin: startRowIndex });
+
+      // Update worksheet !ref range to encompass all new records
+      const maxColLetter = isNew ? "X" : "Z";
+      const totalRowsCount = startRowIndex + rawData.length;
+      worksheet["!ref"] = `A1:${maxColLetter}${totalRowsCount}`;
+
+      XLSX.writeFile(workbook, "Mau_import_hoa_don_GTGT.xlsx");
+      addLog(`Xuất thành công tập tin Mau_import_hoa_don_GTGT.xlsx! Định dạng tương thích 100% với tệp mẫu hệ thống.`);
+    } catch (err: any) {
+      console.error(err);
+      addLog(`[Lỗi] Lỗi xuất file: ${err.message || err}`);
+      alert(`Đã xảy ra lỗi khi lập file từ tệp tin mẫu: ${err.message || err}`);
     }
-
-    const worksheet = XLSX.utils.json_to_sheet(cleanedRows);
-    const workbook = XLSX.utils.book_new();
-
-    worksheet["!cols"] = colWidths;
-
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Mau_import_hoa_don_GTGT");
-    XLSX.writeFile(workbook, "Mau_import_hoa_don_GTGT.xlsx");
-    addLog(`Xuất thành công tập tin Mau_import_hoa_don_GTGT.xlsx (${exportFormat === "new" ? "định dạng mới" : "định dạng cũ"}) về máy tính!`);
   };
 
   const filteredSummaries = step2Stats?.invoiceTaxSummaries
@@ -975,10 +981,14 @@ export default function ExcelProcessor({
               className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
                 activeStepTab === "step1"
                   ? "bg-blue-600 text-white border-blue-600"
+                  : (products.length > 0 && invoices.length > 0)
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
                   : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
               }`}
             >
-              <span className="w-5 h-5 flex items-center justify-center bg-white/20 rounded-full text-[10px]">1</span>
+              <span className={`w-5 h-5 flex items-center justify-center rounded-full text-[10px] ${(products.length > 0 && invoices.length > 0) ? (activeStepTab === "step1" ? "bg-white/25 text-white" : "bg-emerald-600 text-white") : "bg-white/20"}`}>
+                {(products.length > 0 && invoices.length > 0) ? "✓" : "1"}
+              </span>
               <span>Bước 1: Nạp File</span>
             </button>
             <div className="text-slate-300">➔</div>
@@ -1132,7 +1142,7 @@ export default function ExcelProcessor({
                       id="goto-step2-btn-from-preview"
                       className="flex items-center space-x-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold shadow-sm transition active:scale-95 cursor-pointer"
                     >
-                      <span>Tiến hành Bước 2: Bổ xung cột</span>
+                      <span>Tiến hành Bước 2: Cập nhật bổ sung dữ liệu thuế hàng hóa</span>
                       <ArrowRight className="h-4 w-4" />
                     </button>
                   )}
@@ -1254,12 +1264,12 @@ export default function ExcelProcessor({
                 
                 {step2Processed && (
                   <button
-                    onClick={handleExportStep2}
-                    id="download-step2-xlsx"
-                    className="flex items-center space-x-1.5 px-3 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold shadow-sm transition cursor-pointer"
+                    onClick={runStep3Processing}
+                    id="goto-step3-from-step2-top"
+                    className="flex items-center space-x-1.5 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold shadow-md transition duration-200 active:scale-95 cursor-pointer"
                   >
-                    <Download className="h-4 w-4 shrink-0" />
-                    <span>Tải Excel chi tiết đã bổ sung (.xlsx)</span>
+                    <span>Chuyển sang Bước 3</span>
+                    <ArrowRight className="h-4 w-4 shrink-0" />
                   </button>
                 )}
               </div>
@@ -1287,11 +1297,17 @@ export default function ExcelProcessor({
                       <Check className="h-5 w-5" />
                     </div>
                     <div className="space-y-0.5">
-                      <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Mức thuế suất phát sinh</div>
-                      <div className="text-sm font-bold text-slate-800">
-                        Có {step2Stats.taxRates.length} mức: <span className="text-emerald-700 font-mono">{step2Stats.taxRates.map(r => `${Math.round(r * 100)}%`).join(", ")}</span>
+                      <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Nhận diện hàng hóa Khuyến mãi</div>
+                      <div className="text-sm font-bold text-slate-800 flex items-center space-x-1.5">
+                        {step2Stats.hasPromotion ? (
+                          <span className="px-2 py-0.5 bg-rose-100 text-rose-700 text-xs rounded-full font-sans font-bold">CÓ hàng hóa khuyến mãi</span>
+                        ) : (
+                          <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-xs rounded-full font-sans font-medium">KHÔNG có hàng hóa khuyến mãi</span>
+                        )}
                       </div>
-                      <p className="text-[10px] text-slate-500 font-sans">Xác thực tự động từ look-up mã kết nối giữa Mã hàng & Mã món.</p>
+                      <p className="text-[10px] text-slate-500 font-sans">
+                        Có <span className="font-bold text-slate-800">{step2Stats.totalZeroPriceCount}</span> sản phẩm (dòng) có đơn giá hoặc giá bán bằng 0 tự động nhận diện.
+                      </p>
                     </div>
                   </div>
 
@@ -1312,87 +1328,6 @@ export default function ExcelProcessor({
                     </div>
                   </div>
                 </div>
-
-                {/* Chẩn đoán khớp cột & kiểm tra công thức tính toán */}
-                {step2Invoices.length > 0 && invoices.length > 0 && (
-                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
-                    <div className="border-b border-slate-200 pb-2">
-                      <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center space-x-1.5 text-indigo-700">
-                        <span className="inline-block w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
-                        <span>Bản đồ chẩn đoán giá trị & công thức dòng đầu tiên</span>
-                      </h4>
-                      <p className="text-[10px] text-slate-500 mt-0.5 font-sans">
-                        Kiểm thử tự động giúp bạn xác minh hệ thống có lấy đúng nguồn cột [Giá bán] hay không, và xem trực quan kết quả từng bước làm tròn.
-                      </p>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs font-sans">
-                      <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
-                        <div>
-                          <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Cột bóc tách đơn giá (AU)</span>
-                          <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 truncate" title={colMapping.invoicePriceCol}>
-                            {colMapping.invoicePriceCol}
-                          </span>
-                        </div>
-                        <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                          <span>Dòng 1 trong file:</span>
-                          <span className="font-bold font-mono text-indigo-600">
-                            {String(getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol) !== undefined ? getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol) : "Trống")}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
-                        <div>
-                          <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Mã hàng & Mức thuế (AZ)</span>
-                          <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 truncate" title={String(getValueByFlexibleKey(invoices[0], colMapping.invoiceProductCodeCol) || "N/A")}>
-                            {String(getValueByFlexibleKey(invoices[0], colMapping.invoiceProductCodeCol) || "N/A")}
-                          </span>
-                        </div>
-                        <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                          <span>Thuế suất lookup:</span>
-                          <span className="font-bold font-mono text-emerald-600">
-                            {Math.round((step2Invoices[0]["Thuế bán hàng"] || 0) * 100)}%
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
-                        <div>
-                          <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Giá bán trước thuế (BA)</span>
-                          <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 text-blue-700">
-                            {(step2Invoices[0]["Giá bán trước thuế"] ?? 0).toLocaleString("vi-VN")} đ
-                          </span>
-                        </div>
-                        <div className="text-[9px] text-slate-400 font-mono italic mt-1">
-                          Hiệu chỉnh: AU / (1 + AZ)
-                        </div>
-                      </div>
-
-                      <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
-                        <div>
-                          <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Tiền thuế bổ sung (BB)</span>
-                          <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 text-amber-700">
-                            {(step2Invoices[0]["Tiền thuế"] ?? 0).toLocaleString("vi-VN")} đ
-                          </span>
-                        </div>
-                        <div className="text-[9px] text-slate-400 font-mono italic mt-1">
-                          Hiệu chỉnh: BA * AZ
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="text-[10px] text-indigo-800 bg-indigo-50/50 p-3 rounded-lg border border-indigo-100 flex items-start space-x-1.5 font-sans leading-relaxed">
-                      <Info className="h-4 w-4 mt-0.5 text-indigo-500 shrink-0" />
-                      <span>
-                        <strong>Giải trình dòng thứ nhất:</strong> Đơn giá/Giá bán gốc (Cột AU) đọc được từ Excel là <span className="font-bold font-mono">{getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol)}</span> (bóc tách dạng số = <span className="font-bold text-slate-900">{parseVietnameseNumber(getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol)).toLocaleString("vi-VN")}</span>). 
-                        Thuế suất xác định được từ danh mục (Cột AZ) là <span className="font-bold font-mono text-emerald-700">{Math.round((step2Invoices[0]["Thuế bán hàng"] ?? 0.08) * 100)}%</span>.
-                        Do đó, Giá bán trước thuế (BA) = <span className="font-bold font-mono text-slate-900">{parseVietnameseNumber(getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol)).toLocaleString("vi-VN")} / (1 + {step2Invoices[0]["Thuế bán hàng"] ?? 0.08})</span> = <span className="text-blue-700 font-bold">{(step2Invoices[0]["Giá bán trước thuế"] ?? 0).toLocaleString("vi-VN")} đ</span>.
-                        Tiền thuế (BB) = <span className="font-bold font-mono text-slate-900">{(step2Invoices[0]["Giá bán trước thuế"] ?? 0).toLocaleString("vi-VN")} * {Math.round((step2Invoices[0]["Thuế bán hàng"] ?? 0.08) * 100)}%</span> = <span className="text-amber-700 font-bold">{(step2Invoices[0]["Tiền thuế"] ?? 0).toLocaleString("vi-VN")} đ</span>.
-                      </span>
-                    </div>
-                  </div>
-                )}
 
                 {/* Phân tích số mức thuế suất theo từng hóa đơn cụ thể */}
                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
@@ -1434,7 +1369,16 @@ export default function ExcelProcessor({
                           filteredSummaries.slice((step2Page - 1) * 8, step2Page * 8).map((summary, idx) => (
                             <tr key={idx} className="hover:bg-slate-50/70 transition">
                               <td className="py-1.5 px-3 font-semibold text-blue-600">{summary.invoiceId}</td>
-                              <td className="py-1.5 px-3 text-center font-bold text-slate-700">{summary.itemCount} sp</td>
+                              <td className="py-1.5 px-3 text-center">
+                                <div className="flex flex-col items-center justify-center">
+                                  <span className="font-bold text-slate-700">{summary.itemCount} sp</span>
+                                  {summary.zeroPriceCount > 0 && (
+                                    <span className="text-[9px] text-rose-600 font-bold bg-rose-50 border border-rose-100 rounded px-1 py-0.2 mt-0.5 leading-tight">
+                                      {summary.zeroPriceCount} dòng Giá = 0
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
                               <td className="py-1.5 px-3 text-center">
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${summary.taxCount > 1 ? 'bg-amber-50 text-amber-700 border border-amber-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
                                   {summary.taxCount} mức thuế
@@ -1473,6 +1417,101 @@ export default function ExcelProcessor({
                     </div>
                   )}
                 </div>
+
+                {/* Chẩn đoán khớp cột & kiểm tra công thức tính toán */}
+                {step2Invoices.length > 0 && invoices.length > 0 && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 transition duration-200">
+                    <button
+                      type="button"
+                      onClick={() => setShowDiagnostic((prev) => !prev)}
+                      className="w-full flex items-center justify-between text-left focus:outline-none group cursor-pointer"
+                    >
+                      <div className="space-y-0.5">
+                        <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center space-x-1.5 text-indigo-700">
+                          <span className="inline-block w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+                          <span>Review xác định dữ liệu cần bổ sung</span>
+                        </h4>
+                        <p className="text-[10px] text-slate-500 font-sans">
+                          Kiểm thử tự động giúp bạn xác minh hệ thống có lấy đúng nguồn cột [Giá bán] hay không, và xem trực quan kết quả từng bước làm tròn.
+                        </p>
+                      </div>
+                      <div className="flex items-center space-x-1 bg-indigo-50 group-hover:bg-indigo-100 text-indigo-600 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition shrink-0 ml-4 shadow-inner">
+                        <span>{showDiagnostic ? "Thu gọn" : "Xem chi tiết"}</span>
+                        {showDiagnostic ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                      </div>
+                    </button>
+
+                    {showDiagnostic && (
+                      <div className="mt-4 pt-4 border-t border-slate-200/80 space-y-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs font-sans">
+                          <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
+                            <div>
+                              <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Cột bóc tách đơn giá (AU)</span>
+                              <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 truncate" title={colMapping.invoicePriceCol}>
+                                {colMapping.invoicePriceCol}
+                              </span>
+                            </div>
+                            <div className="flex justify-between text-[10px] text-slate-500 mt-1">
+                              <span>Dòng 1 trong file:</span>
+                              <span className="font-bold font-mono text-indigo-600">
+                                {String(getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol) !== undefined ? getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol) : "Trống")}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
+                            <div>
+                              <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Mã hàng & Mức thuế (AZ)</span>
+                              <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 truncate" title={String(getValueByFlexibleKey(invoices[0], colMapping.invoiceProductCodeCol) || "N/A")}>
+                                {String(getValueByFlexibleKey(invoices[0], colMapping.invoiceProductCodeCol) || "N/A")}
+                              </span>
+                            </div>
+                            <div className="flex justify-between text-[10px] text-slate-500 mt-1">
+                              <span>Thuế suất lookup:</span>
+                              <span className="font-bold font-mono text-emerald-600">
+                                {Math.round((step2Invoices[0]["Thuế bán hàng"] || 0) * 100)}%
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
+                            <div>
+                              <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Giá bán trước thuế (BA)</span>
+                              <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 text-blue-700">
+                                {(step2Invoices[0]["Giá bán trước thuế"] ?? 0).toLocaleString("vi-VN")} đ
+                              </span>
+                            </div>
+                            <div className="text-[9px] text-slate-400 font-mono italic mt-1">
+                              Hiệu chỉnh: AU / (1 + AZ)
+                            </div>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-lg border border-slate-150 shadow-sm flex flex-col justify-between">
+                            <div>
+                              <span className="block text-[9px] text-slate-400 font-bold uppercase tracking-wider">Tiền thuế bổ sung (BB)</span>
+                              <span className="block text-slate-700 font-bold font-mono mt-0.5 border-b pb-1 text-amber-700">
+                                {(step2Invoices[0]["Tiền thuế"] ?? 0).toLocaleString("vi-VN")} đ
+                              </span>
+                            </div>
+                            <div className="text-[9px] text-slate-400 font-mono italic mt-1">
+                              Hiệu chỉnh: BA * AZ
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-[10px] text-indigo-800 bg-indigo-50/50 p-3 rounded-lg border border-indigo-100 flex items-start space-x-1.5 font-sans leading-relaxed">
+                          <Info className="h-4 w-4 mt-0.5 text-indigo-500 shrink-0" />
+                          <span>
+                            <strong>Giải trình dòng thứ nhất:</strong> Đơn giá/Giá bán gốc (Cột AU) đọc được từ Excel là <span className="font-bold font-mono">{getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol)}</span> (bóc tách dạng số = <span className="font-bold text-slate-900">{parseVietnameseNumber(getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol)).toLocaleString("vi-VN")}</span>). 
+                            Thuế suất xác định được từ danh mục (Cột AZ) là <span className="font-bold font-mono text-emerald-700">{Math.round((step2Invoices[0]["Thuế bán hàng"] ?? 0.08) * 100)}%</span>.
+                            Do đó, Giá bán trước thuế (BA) = <span className="font-bold font-mono text-slate-900">{parseVietnameseNumber(getValueByFlexibleKey(invoices[0], colMapping.invoicePriceCol)).toLocaleString("vi-VN")} / (1 + {step2Invoices[0]["Thuế bán hàng"] ?? 0.08})</span> = <span className="text-blue-700 font-bold">{(step2Invoices[0]["Giá bán trước thuế"] ?? 0).toLocaleString("vi-VN")} đ</span>.
+                            Tiền thuế (BB) = <span className="font-bold font-mono text-slate-900">{(step2Invoices[0]["Giá bán trước thuế"] ?? 0).toLocaleString("vi-VN")} * {Math.round((step2Invoices[0]["Thuế bán hàng"] ?? 0.08) * 100)}%</span> = <span className="text-amber-700 font-bold">{(step2Invoices[0]["Tiền thuế"] ?? 0).toLocaleString("vi-VN")} đ</span>.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex flex-col items-center justify-center p-12 bg-slate-50/50 rounded-xl border border-dashed text-slate-400 space-y-2">
@@ -1485,196 +1524,244 @@ export default function ExcelProcessor({
 
           {/* Step 2 Excel visual preview TABLE: DanhSachChiTietHoaDon_Daxuly */}
           {step2Processed && step2Invoices.length > 0 && (
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden space-y-4">
-              {/* Nested Sub-Tabs header selection */}
-              <div className="bg-slate-50/50 p-2.5 border-b border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
-                <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200 shadow-inner">
-                  <button
-                    onClick={() => setActiveStep2SubTab("step2_1")}
-                    className={`px-4 py-1.5 rounded-md text-xs font-bold transition duration-200 flex items-center space-x-1.5 ${
-                      activeStep2SubTab === "step2_1"
-                        ? "bg-white text-blue-600 shadow-sm"
-                        : "text-slate-500 hover:text-slate-800"
-                    }`}
-                  >
-                    <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] uppercase font-mono">Bản 2.1</span>
-                    <span>Bổ sung Thuế suất</span>
-                  </button>
-                  <button
-                    onClick={() => setActiveStep2SubTab("step2_2")}
-                    className={`px-4 py-1.5 rounded-md text-xs font-bold transition duration-200 flex items-center space-x-1.5 ${
-                      activeStep2SubTab === "step2_2"
-                        ? "bg-white text-indigo-600 shadow-sm"
-                        : "text-slate-500 hover:text-slate-800"
-                    }`}
-                  >
-                    <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 text-[10px] uppercase font-mono">Bản 2.2</span>
-                    <span>Bổ sung Giá trước thuế & Tiền thuế</span>
-                  </button>
+            <div className="bg-white rounded-xl border border-blue-200 shadow-md overflow-hidden flex flex-col">
+              {/* Header Title Bar with Collapse Trigger */}
+              <button
+                type="button"
+                onClick={() => setShowStep2Preview((prev) => !prev)}
+                className="w-full bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 p-3.5 border-b border-blue-700 flex items-center justify-between transition text-left focus:outline-none cursor-pointer text-white shadow-xs"
+              >
+                <div className="flex items-center space-x-2.5">
+                  <span className="p-1 px-1.5 rounded bg-white/20 text-white text-[10px] font-black uppercase tracking-wider font-mono animate-pulse">LIVE PREVIEW</span>
+                  <h4 className="font-extrabold text-white text-xs uppercase tracking-widest font-sans">
+                    BẢNG DỮ LIỆU ĐÃ BỔ SUNG DỮ LIỆU THUẾ
+                  </h4>
                 </div>
-                <div className="flex items-center space-x-2 font-sans text-[11px]">
-                  <span className="font-bold text-slate-500">Đánh dấu Excel Alphabet:</span>
-                  <span className="bg-amber-100 text-amber-800 font-bold border border-amber-200 px-2 py-0.5 rounded">Đã bật (A, B, C...)</span>
+                <div className="flex items-center space-x-2">
+                  <span className="text-[10px] font-bold text-blue-100 uppercase tracking-wider font-sans">
+                    {showStep2Preview ? "Thu gọn" : "Xem chi tiết"}
+                  </span>
+                  <div className="flex items-center justify-center w-5.5 h-5.5 rounded bg-white/10 border border-white/20 text-white shadow-2xs">
+                    {showStep2Preview ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                  </div>
                 </div>
-              </div>
+              </button>
 
-              {activeStep2SubTab === "step2_1" ? (
-                <div className="space-y-2">
-                  <div className="px-5 text-xs text-slate-500">
-                    <span className="font-bold text-slate-800">Bước 2.1:</span> Chỉ nạp thêm cột <strong className="text-blue-600 font-bold">Thuế bán hàng (bổ sung)</strong> tra cứu tương ứng từ Danh mục hàng hóa (A, B, C... để xác định vị trí).
+              {showStep2Preview && (
+                <div className="space-y-4 pt-3">
+                  {/* Nested Sub-Tabs header selection */}
+                  <div className="bg-slate-50/60 px-4 py-2 border-b border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200 shadow-inner">
+                      <button
+                        onClick={() => setActiveStep2SubTab("step2_1")}
+                        className={`px-3 py-1.5 rounded-md text-[11px] font-extrabold transition duration-200 flex items-center space-x-1.5 cursor-pointer ${
+                          activeStep2SubTab === "step2_1"
+                            ? "bg-white text-blue-700 shadow-xs border border-slate-200"
+                            : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
+                        }`}
+                      >
+                        <span className="px-1.5 py-0.2 rounded bg-blue-100 text-blue-800 text-[9px] uppercase font-mono font-black">BƯỚC 2.1</span>
+                        <span>Bổ sung Thuế suất</span>
+                      </button>
+                      <button
+                        onClick={() => setActiveStep2SubTab("step2_2")}
+                        className={`px-3 py-1.5 rounded-md text-[11px] font-extrabold transition duration-200 flex items-center space-x-1.5 cursor-pointer ${
+                          activeStep2SubTab === "step2_2"
+                            ? "bg-white text-indigo-700 shadow-xs border border-slate-200"
+                            : "text-slate-500 hover:text-slate-800 hover:bg-white/50"
+                        }`}
+                      >
+                        <span className="px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 text-[9px] uppercase font-mono font-black">BƯỚC 2.2</span>
+                        <span>Bổ sung Giá trước thuế & Tiền thuế</span>
+                      </button>
+                    </div>
+                    {step2Processed && (
+                      <button
+                        onClick={handleExportStep2}
+                        id="download-step2-xlsx-new"
+                        className="flex items-center space-x-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-xs transition active:scale-95 cursor-pointer mr-1"
+                      >
+                        <Download className="h-3 w-3 shrink-0" />
+                        <span>Tải File Update</span>
+                      </button>
+                    )}
                   </div>
-                  <div className="overflow-x-auto max-h-[300px]">
-                    <table className="w-full text-left text-[11px] text-slate-600 divide-y divide-slate-200 whitespace-nowrap">
-                      <thead className="bg-[#f8fafc] sticky top-0 font-semibold text-slate-700 border-b z-10">
-                        {/* Alphabetical row label */}
-                        <tr className="bg-slate-100/90 text-slate-500 font-mono font-bold text-center text-[10px] border-b border-slate-200">
-                          {Object.keys(invoices[0] || {}).map((col, idx) => (
-                            <th key={`alpha-21-${idx}`} className="py-1 px-3 border-r border-slate-200 bg-slate-100 font-bold">
-                              {getExcelColumnLabel(idx)}
-                            </th>
-                          ))}
-                          <th className="py-1 px-3 text-center text-blue-800 bg-blue-100 border-r border-slate-200 font-bold font-mono">
-                            {getExcelColumnLabel(Object.keys(invoices[0] || {}).length)}
-                          </th>
-                        </tr>
-                        {/* Title Headers */}
-                        <tr>
-                          {Object.keys(invoices[0] || {}).map((col, idx) => (
-                            <th key={`head-21-${idx}`} className="py-2.5 px-3 border-r border-slate-250 text-slate-700 font-sans">{col}</th>
-                          ))}
-                          <th className="py-2.5 px-3 text-center text-blue-800 bg-blue-50/40 border-r border-slate-250 font-sans">Thuế bán hàng (bổ sung)</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y font-mono">
-                        {step2Invoices.slice(0, 15).map((row, idx) => {
-                          const cells = Object.keys(invoices[0] || {});
-                          const taxRateVal = row["Thuế bán hàng"];
-                          const taxRatePercent = taxRateVal !== undefined ? `${Math.round(taxRateVal * 100)}%` : "8%";
-                          return (
-                            <tr key={`row-21-${idx}`} className="hover:bg-slate-50/70 transition">
-                              {cells.map((col, cIdx) => {
-                                const val = row[col];
-                                let formattedVal = "";
-                                if (typeof val === "number") {
-                                  formattedVal = val.toLocaleString("vi-VN");
-                                } else {
-                                  const parsedVal = parseFloat(String(val || "").replace(/,/g, ""));
-                                  if (!isNaN(parsedVal) && String(val).trim().length > 3 && (String(val).includes(".") || String(val).includes(","))) {
-                                    formattedVal = parsedVal.toLocaleString("vi-VN");
-                                  } else {
-                                    formattedVal = String(val !== undefined && val !== null ? val : "");
-                                  }
-                                }
-                                return (
-                                  <td key={`cell-21-${idx}-${cIdx}`} className="py-2 px-3 border-r border-slate-150 text-slate-700 font-sans">
-                                    {formattedVal}
-                                  </td>
-                                );
-                              })}
-                              <td className="py-2 px-3 text-center font-bold text-blue-600 bg-blue-50/10 border-r border-slate-150">
-                                {taxRatePercent}
-                              </td>
+
+                  {activeStep2SubTab === "step2_1" ? (
+                    <div className="space-y-3">
+                      <div className="mx-4 text-xs bg-blue-50/70 border border-blue-100 p-3 rounded-xl flex items-start space-x-2 text-blue-900 leading-relaxed font-sans shadow-2xs">
+                        <Info className="h-4 w-4 shrink-0 text-blue-500 mt-0.5" />
+                        <div>
+                          <strong className="font-black text-blue-950 uppercase tracking-wide">BƯỚC 2.1 (TRA CỨU THUẾ SUẤT):</strong> Đối chiếu tự động theo <span className="underline decoration-blue-300 font-semibold text-blue-950">Mã sản phẩm</span> từ Danh mục hàng hóa để tự động điền thêm cột <span className="bg-blue-100 text-blue-800 px-1.5 py-0.2 rounded font-mono font-bold text-[10px]">Thuế bán hàng (bổ sung)</span> tương ứng.
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto max-h-[300px] border-y border-slate-200">
+                        <table className="w-full text-left font-sans text-[11px] text-slate-600 divide-y divide-slate-150 whitespace-nowrap table-layout-fixed">
+                          <thead className="bg-[#f8fafc] sticky top-0 font-semibold text-slate-700 border-b z-10">
+                            {/* Alphabetical row label */}
+                            <tr className="bg-slate-100 text-slate-500 font-mono font-black text-center text-[9px] uppercase tracking-wider border-b border-slate-200">
+                              {Object.keys(invoices[0] || {}).map((col, idx) => (
+                                <th key={`alpha-21-${idx}`} className="py-1 px-3 border-r border-slate-200 bg-slate-105 font-black text-slate-600">
+                                  {getExcelColumnLabel(idx)}
+                                </th>
+                              ))}
+                              <th className="py-1 px-3 text-center text-blue-800 bg-blue-100 border-r border-slate-200 font-black font-mono">
+                                {getExcelColumnLabel(Object.keys(invoices[0] || {}).length)}
+                              </th>
                             </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <div className="px-5 text-xs text-slate-500">
-                    <span className="font-bold text-slate-800">Bước 2.2:</span> Bổ sung cột <strong className="text-teal-600 font-bold">Giá bán trước thuế (bổ sung)</strong> và cột <strong className="text-purple-600 font-bold">Tiền thuế (bổ sung)</strong>. Công thức: <strong className="text-teal-700">Giá bán trước thuế = Giá bán / (1 + Thuế bán hàng)</strong> và <strong className="text-purple-700">Tiền thuế = Giá bán trước thuế * Thuế bán hàng</strong> để kiểm tra tương quan.
-                  </div>
-                  <div className="overflow-x-auto max-h-[300px]">
-                    <table className="w-full text-left text-[11px] text-slate-600 divide-y divide-slate-200 whitespace-nowrap">
-                      <thead className="bg-[#f8fafc] sticky top-0 font-semibold text-slate-700 border-b z-10">
-                        {/* Alphabetical row label */}
-                        <tr className="bg-slate-100/90 text-slate-500 font-mono font-bold text-center text-[10px] border-b border-slate-200">
-                          {Object.keys(invoices[0] || {}).map((col, idx) => (
-                            <th key={`alpha-22-${idx}`} className="py-1 px-3 border-r border-slate-200 bg-slate-100 font-bold">
-                              {getExcelColumnLabel(idx)}
-                            </th>
-                          ))}
-                          <th className="py-1 px-3 text-center text-blue-800 bg-blue-100 border-r border-slate-200 font-bold font-mono">
-                            {getExcelColumnLabel(Object.keys(invoices[0] || {}).length)}
-                          </th>
-                          <th className="py-1 px-3 text-right text-teal-800 bg-teal-100 border-r border-slate-200 font-bold font-mono">
-                            {getExcelColumnLabel(Object.keys(invoices[0] || {}).length + 1)}
-                          </th>
-                          <th className="py-1 px-3 text-right text-purple-800 bg-purple-100 font-bold font-mono">
-                            {getExcelColumnLabel(Object.keys(invoices[0] || {}).length + 2)}
-                          </th>
-                        </tr>
-                        {/* Title Headers */}
-                        <tr>
-                          {Object.keys(invoices[0] || {}).map((col, idx) => (
-                            <th key={`head-22-${idx}`} className="py-2.5 px-3 border-r border-slate-250 text-slate-700 font-sans">{col}</th>
-                          ))}
-                          <th className="py-2.5 px-3 text-center text-blue-800 bg-blue-50/40 border-r border-slate-250 font-sans">Thuế bán hàng (bổ sung)</th>
-                          <th className="py-2.5 px-3 text-right text-teal-800 bg-teal-50/40 border-r border-slate-250 font-sans">Giá bán trước thuế (bổ sung)</th>
-                          <th className="py-2.5 px-3 text-right text-purple-800 bg-purple-50/40 font-sans">Tiền thuế (bổ sung)</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y font-mono">
-                        {step2Invoices.slice(0, 15).map((row, idx) => {
-                          const cells = Object.keys(invoices[0] || {});
-                          const taxRateVal = row["Thuế bán hàng"];
-                          const taxRatePercent = taxRateVal !== undefined ? `${Math.round(taxRateVal * 100)}%` : "8%";
-                          const priceBeforeTax = row["Giá bán trước thuế"] || 0;
-                          const taxAmount = row["Tiền thuế"] || 0;
-                          return (
-                            <tr key={`row-22-${idx}`} className="hover:bg-slate-50/70 transition">
-                              {cells.map((col, cIdx) => {
-                                const val = row[col];
-                                let formattedVal = "";
-                                if (typeof val === "number") {
-                                  formattedVal = val.toLocaleString("vi-VN");
-                                } else {
-                                  const parsedVal = parseFloat(String(val || "").replace(/,/g, ""));
-                                  if (!isNaN(parsedVal) && String(val).trim().length > 3 && (String(val).includes(".") || String(val).includes(","))) {
-                                    formattedVal = parsedVal.toLocaleString("vi-VN");
-                                  } else {
-                                    formattedVal = String(val !== undefined && val !== null ? val : "");
-                                  }
-                                }
-                                return (
-                                  <td key={`cell-22-${idx}-${cIdx}`} className="py-2 px-3 border-r border-slate-150 text-slate-700 font-sans">
-                                    {formattedVal}
-                                  </td>
-                                );
-                              })}
-                              <td className="py-2 px-3 text-center font-bold text-blue-600 bg-blue-50/10 border-r border-slate-150">
-                                {taxRatePercent}
-                              </td>
-                              <td className="py-2 px-3 text-right font-bold text-teal-700 bg-teal-50/10 border-r border-slate-150">
-                                {priceBeforeTax.toLocaleString("vi-VN")} đ
-                              </td>
-                              <td className="py-2 px-3 text-right font-bold text-purple-700 bg-purple-50/10">
-                                {taxAmount.toLocaleString("vi-VN")} đ
-                              </td>
+                            {/* Title Headers */}
+                            <tr className="bg-slate-50">
+                              {Object.keys(invoices[0] || {}).map((col, idx) => (
+                                <th key={`head-21-${idx}`} className="py-2.5 px-3 border-r border-slate-200 text-slate-700 font-bold uppercase text-[10px] tracking-wide">{col}</th>
+                              ))}
+                              <th className="py-2.5 px-3 text-center text-blue-800 bg-blue-50 border-r border-slate-200 font-bold uppercase text-[10px] tracking-wide">Thuế bán hàng (bổ sung)</th>
                             </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {step2Invoices.slice(0, 15).map((row, idx) => {
+                              const cells = Object.keys(invoices[0] || {});
+                              const taxRateVal = row["Thuế bán hàng"];
+                              const taxRatePercent = taxRateVal !== undefined ? `${Math.round(taxRateVal * 100)}%` : "8%";
+                              return (
+                                <tr key={`row-21-${idx}`} className="hover:bg-blue-50/20 transition even:bg-slate-50/30">
+                                  {cells.map((col, cIdx) => {
+                                    const val = row[col];
+                                    let formattedVal = "";
+                                    let isNumericType = false;
+                                    if (typeof val === "number") {
+                                      formattedVal = val.toLocaleString("vi-VN");
+                                      isNumericType = true;
+                                    } else {
+                                      const parsedVal = parseFloat(String(val || "").replace(/,/g, ""));
+                                      if (!isNaN(parsedVal) && String(val).trim().length > 3 && (String(val).includes(".") || String(val).includes(","))) {
+                                        formattedVal = parsedVal.toLocaleString("vi-VN");
+                                        isNumericType = true;
+                                      } else {
+                                        formattedVal = String(val !== undefined && val !== null ? val : "");
+                                      }
+                                    }
+                                    return (
+                                      <td key={`cell-21-${idx}-${cIdx}`} className={`py-2 px-3 border-r border-slate-100 text-slate-700 font-sans ${isNumericType ? 'text-right font-mono text-[10.5px]' : 'text-left'}`}>
+                                        {formattedVal}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="py-2 px-3 text-center font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100 font-mono">
+                                    {taxRatePercent}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="mx-4 text-xs bg-indigo-50/70 border border-indigo-100 p-3 rounded-xl flex items-start space-x-2 text-indigo-900 leading-relaxed font-sans shadow-2xs">
+                        <Info className="h-4 w-4 shrink-0 text-indigo-500 mt-0.5" />
+                        <div>
+                          <strong className="font-black text-indigo-950 uppercase tracking-wide">BƯỚC 2.2 (PHÂN TÍCH TÀI CHÍNH):</strong> Hệ thống tự động bổ sung cột <span className="bg-teal-100 text-teal-800 px-1.5 py-0.2 rounded font-sans font-bold text-[10px]">Giá bán trước thuế</span> và <span className="bg-purple-100 text-purple-800 px-1.5 py-0.2 rounded font-sans font-bold text-[10px]">Tiền thuế (bổ sung)</span>. Công thức quy chuẩn:
+                          <div className="mt-1.5 flex flex-wrap gap-2 text-[10px]/normal">
+                            <span className="bg-white/80 border border-indigo-200 text-slate-705 px-2 py-0.5 rounded font-mono font-bold">Giá bán trước thuế = Giá bán / (1 + Thuế suất)</span>
+                            <span className="bg-white/80 border border-indigo-200 text-slate-705 px-2 py-0.5 rounded font-mono font-bold">Tiền thuế = Giá bán trước thuế * Thuế suất</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto max-h-[300px] border-y border-slate-200">
+                        <table className="w-full text-left font-sans text-[11px] text-slate-600 divide-y divide-slate-150 whitespace-nowrap table-layout-fixed">
+                          <thead className="bg-[#f8fafc] sticky top-0 font-semibold text-slate-700 border-b z-10">
+                            {/* Alphabetical row label */}
+                            <tr className="bg-slate-100 text-slate-500 font-mono font-black text-center text-[9px] uppercase tracking-wider border-b border-slate-200">
+                              {Object.keys(invoices[0] || {}).map((col, idx) => (
+                                <th key={`alpha-22-${idx}`} className="py-1 px-3 border-r border-slate-200 bg-slate-105 font-black text-slate-600">
+                                  {getExcelColumnLabel(idx)}
+                                </th>
+                              ))}
+                              <th className="py-1 px-3 text-center text-blue-800 bg-blue-100 border-r border-slate-200 font-bold font-mono">
+                                {getExcelColumnLabel(Object.keys(invoices[0] || {}).length)}
+                              </th>
+                              <th className="py-1 px-3 text-right text-teal-800 bg-teal-100 border-r border-slate-200 font-bold font-mono">
+                                {getExcelColumnLabel(Object.keys(invoices[0] || {}).length + 1)}
+                              </th>
+                              <th className="py-1 px-3 text-right text-purple-800 bg-purple-100 font-bold font-mono">
+                                {getExcelColumnLabel(Object.keys(invoices[0] || {}).length + 2)}
+                              </th>
+                            </tr>
+                            {/* Title Headers */}
+                            <tr className="bg-slate-50">
+                              {Object.keys(invoices[0] || {}).map((col, idx) => (
+                                <th key={`head-22-${idx}`} className="py-2.5 px-3 border-r border-slate-200 text-slate-700 font-bold uppercase text-[10px] tracking-wide">{col}</th>
+                              ))}
+                              <th className="py-2.5 px-3 text-center text-blue-800 bg-blue-50 border-r border-slate-200 font-bold uppercase text-[10px] tracking-wide">Thuế bán hàng (bổ sung)</th>
+                              <th className="py-2.5 px-3 text-right text-teal-800 bg-teal-50 border-r border-slate-200 font-bold uppercase text-[10px] tracking-wide">Giá bán trước thuế (bổ sung)</th>
+                              <th className="py-2.5 px-3 text-right text-purple-800 bg-purple-50 font-bold uppercase text-[10px] tracking-wide">Tiền thuế (bổ sung)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {step2Invoices.slice(0, 15).map((row, idx) => {
+                              const cells = Object.keys(invoices[0] || {});
+                              const taxRateVal = row["Thuế bán hàng"];
+                              const taxRatePercent = taxRateVal !== undefined ? `${Math.round(taxRateVal * 100)}%` : "8%";
+                              const priceBeforeTax = row["Giá bán trước thuế"] || 0;
+                              const taxAmount = row["Tiền thuế"] || 0;
+                              return (
+                                <tr key={`row-22-${idx}`} className="hover:bg-indigo-50/20 transition even:bg-slate-50/30">
+                                  {cells.map((col, cIdx) => {
+                                    const val = row[col];
+                                    let formattedVal = "";
+                                    let isNumericType = false;
+                                    if (typeof val === "number") {
+                                      formattedVal = val.toLocaleString("vi-VN");
+                                      isNumericType = true;
+                                    } else {
+                                      const parsedVal = parseFloat(String(val || "").replace(/,/g, ""));
+                                      if (!isNaN(parsedVal) && String(val).trim().length > 3 && (String(val).includes(".") || String(val).includes(","))) {
+                                        formattedVal = parsedVal.toLocaleString("vi-VN");
+                                        isNumericType = true;
+                                      } else {
+                                        formattedVal = String(val !== undefined && val !== null ? val : "");
+                                      }
+                                    }
+                                    return (
+                                      <td key={`cell-22-${idx}-${cIdx}`} className={`py-2 px-3 border-r border-slate-100 text-slate-705 font-sans ${isNumericType ? 'text-right font-mono text-[10.5px]' : 'text-left'}`}>
+                                        {formattedVal}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="py-2 px-3 text-center font-bold text-blue-700 bg-blue-50/30 border-r border-slate-100 font-mono">
+                                    {taxRatePercent}
+                                  </td>
+                                  <td className="py-2 px-3 text-right font-bold text-teal-800 bg-teal-50/30 border-r border-slate-100 font-mono">
+                                    {priceBeforeTax.toLocaleString("vi-VN")} đ
+                                  </td>
+                                  <td className="py-2 px-3 text-right font-bold text-purple-800 bg-purple-50/30 font-mono">
+                                    {taxAmount.toLocaleString("vi-VN")} đ
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="p-4 bg-slate-50 border-t flex flex-col sm:flex-row items-center justify-between gap-4 font-sans">
+                    <span className="text-[10px] text-slate-550 font-sans">
+                      Hiển thị 15 dòng đầu trong tổng số {step2Invoices.length} dòng dữ liệu. 100% cột dữ liệu gốc của file được giữ nguyên, các cột bổ sung có dán nhãn chữ cái Alphabet Excel tương đối phía trên giúp kiểm chứng công thức chính xác.
+                    </span>
+                    <button
+                      onClick={runStep3Processing}
+                      id="goto-step3-from-step2"
+                      className="flex items-center space-x-1 px-4 py-2 bg-blue-600 hover:bg-blue-550 text-white rounded-lg text-xs font-bold shadow-md cursor-pointer whitespace-nowrap active:scale-95 transition"
+                    >
+                      <span>Chuyển sang Bước 3</span>
+                      <ArrowRight className="h-4.5 w-4.5" />
+                    </button>
                   </div>
                 </div>
               )}
-
-              <div className="p-4 bg-slate-50 border-t flex flex-col sm:flex-row items-center justify-between gap-4">
-                <span className="text-[10px] text-slate-500 font-sans">
-                  Hiển thị 15 dòng đầu trong tổng số {step2Invoices.length} dòng dữ liệu. 100% cột dữ liệu gốc của file được giữ nguyên, các cột bổ sung có dán nhãn chữ cái Alphabet Excel tương đối phía trên giúp kiểm chứng công thức chính xác.
-                </span>
-                <button
-                  onClick={runStep3Processing}
-                  id="goto-step3-from-step2"
-                  className="flex items-center space-x-1 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold shadow-md cursor-pointer whitespace-nowrap"
-                >
-                  <span>Chuyển sang Bước 3</span>
-                  <ArrowRight className="h-4.5 w-4.5" />
-                </button>
-              </div>
             </div>
           )}
         </div>
@@ -1683,151 +1770,293 @@ export default function ExcelProcessor({
       {/* STEP 3 CONTAINER: ÁNH XẠ GỘP NHÓM & XUẤT BẢN FILE ĐẤU NỐI GTGT */}
       {activeStepTab === "step3" && (
         <div className="space-y-6">
-          <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-sm grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
+          <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-sm max-w-4xl mx-auto space-y-5 lg:space-y-6 animate-fade-in">
+            {/* Header / Title */}
+            <div className="flex items-center space-x-2 pb-2 border-b border-slate-200">
+              <Settings2 className="h-4.5 w-4.5 text-blue-600" />
+              <span className="text-xs font-black text-slate-850 uppercase tracking-widest">Tiến Trình Chuyển Đổi</span>
+            </div>
             
-            {/* Left box: Dynamic auto-detected column matching setups */}
-            <div className="lg:col-span-8 flex flex-col justify-between space-y-4">
-              <div>
-                <div className="flex items-center space-x-2 pb-2 border-b border-slate-100 mb-4">
-                  <FileCheck className="h-4.5 w-4.5 text-blue-600" />
-                  <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">Đầu Bố Trí Khớp Cột Excel</span>
-                </div>
-                
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                  <div>
-                    <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-wider">Mã sản phẩm (Catalog)</span>
-                    <select
-                      value={colMapping.productCodeCol}
-                      onChange={(e) => setColMapping({ ...colMapping, productCodeCol: e.target.value })}
-                      className="w-full text-[11px] bg-slate-50 border border-slate-200 rounded p-1.5 text-slate-700 font-mono mt-0.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-semibold"
-                    >
-                      {availableCatalogCols.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-                  
-                  <div>
-                    <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-wider">Mức thuế (Catalog)</span>
-                    <select
-                      value={colMapping.productTaxCol}
-                      onChange={(e) => setColMapping({ ...colMapping, productTaxCol: e.target.value })}
-                      className="w-full text-[11px] bg-slate-50 border border-slate-200 rounded p-1.5 text-slate-700 font-mono mt-0.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-semibold"
-                    >
-                      {availableCatalogCols.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-
-                  <div>
-                    <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-wider">Mã hóa đơn (Dòng HD)</span>
-                    <select
-                      value={colMapping.invoiceIdCol}
-                      onChange={(e) => setColMapping({ ...colMapping, invoiceIdCol: e.target.value })}
-                      className="w-full text-[11px] bg-slate-50 border border-slate-200 rounded p-1.5 text-slate-700 font-mono mt-0.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-semibold"
-                    >
-                      {availableInvoiceCols.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-
-                  <div>
-                    <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-wider">Giá bán (Dòng HD)</span>
-                    <select
-                      value={colMapping.invoicePriceCol}
-                      onChange={(e) => setColMapping({ ...colMapping, invoicePriceCol: e.target.value })}
-                      className="w-full text-[11px] bg-slate-50 border border-slate-200 rounded p-1.5 text-slate-700 font-mono mt-0.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-semibold"
-                    >
-                      {availableInvoiceCols.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-
-                  <div>
-                    <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-wider">Số lượng (Dòng HD)</span>
-                    <select
-                      value={colMapping.invoiceQtyCol}
-                      onChange={(e) => setColMapping({ ...colMapping, invoiceQtyCol: e.target.value })}
-                      className="w-full text-[11px] bg-slate-50 border border-slate-150 rounded p-1.5 text-slate-700 font-mono mt-0.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-semibold"
-                    >
-                      {availableInvoiceCols.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-
-                  <div>
-                    <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-wider">Giảm giá % (Dòng HD)</span>
-                    <select
-                      value={colMapping.invoiceDiscountPercentCol}
-                      onChange={(e) => setColMapping({ ...colMapping, invoiceDiscountPercentCol: e.target.value })}
-                      className="w-full text-[11px] bg-slate-50 border border-slate-150 rounded p-1.5 text-slate-700 font-mono mt-0.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-semibold"
-                    >
-                      {availableInvoiceCols.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              <div className="text-[10px] text-blue-800 bg-blue-50/70 p-3 rounded-lg border border-blue-100 flex items-start space-x-1.5 leading-relaxed font-sans mt-2">
-                <Info className="h-4 w-4 shrink-0 text-blue-500 mt-0.5" />
-                <span>Hệ thống tự động phát hiện chính xác tên cột (Auto heuristics) của file hóa đơn và danh mục sản phẩm của bạn. Bạn có thể thay đổi các tùy chọn trên để đồng bộ hóa nếu tệp nhập của bạn có cấu trúc cột khác biệt.</span>
+            {/* Conversion notes */}
+            <div className="bg-slate-50 border border-slate-150 rounded-xl p-3.5 space-y-2.5 shadow-2xs">
+              <div className="text-[11px] text-slate-600 space-y-2 leading-relaxed font-sans">
+                <p className="flex items-start space-x-1.5">
+                  <span className="text-blue-500 font-bold shrink-0 mt-0.5">•</span>
+                  <span>
+                    Giá trị <strong>Tổng tiền</strong> của dòng Chiết khấu thương mại (CKTM) mặc định luôn luôn mang <strong className="text-teal-700 bg-teal-50 px-1.5 py-0.2 rounded border border-teal-100 font-sans">giá trị dương (+)</strong>.
+                  </span>
+                </p>
+                <p className="flex items-start space-x-1.5">
+                  <span className="text-blue-500 font-bold shrink-0 mt-0.5">•</span>
+                  <span>
+                    Công thức Thành tiền dòng hóa đơn được tinh chỉnh tự động theo quy chuẩn: <code className="bg-slate-200/80 px-1.5 py-0.5 rounded text-indigo-700 font-mono text-[10px] font-bold">Thành tiền = (Giá trước thuế * Số lượng) - Tiền chiết khấu</code>.
+                  </span>
+                </p>
               </div>
             </div>
 
-            {/* Right box: Execution actions */}
-            <div className="lg:col-span-4 bg-slate-50/50 p-4 rounded-xl border border-slate-150 flex flex-col justify-between space-y-4">
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <div className="flex items-center space-x-2 pb-1 border-b border-slate-200">
-                    <Settings2 className="h-4.5 w-4.5 text-slate-600" />
-                    <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">Tiến Trình Chuyển Đổi</span>
-                  </div>
-                  <div className="text-[11px] text-slate-600 space-y-2 leading-relaxed font-sans">
-                    <p>
-                      • Giá trị <strong>Tổng tiền</strong> của dòng Chiết khấu thương mại (CKTM) mặc định luôn luôn mang <strong>giá trị dương (+)</strong>.
-                    </p>
-                    <p>
-                      • Công thức Thành tiền dòng hóa đơn được tinh chỉnh tự động theo quy chuẩn: <code className="bg-slate-200/80 px-1 py-0.5 rounded text-indigo-700 font-mono text-[10px]">Thành tiền = (Giá trước thuế * Số lượng) - Tiền chiết khấu</code>.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Export Format Selector Options */}
-                <div className="bg-white p-3 rounded-lg border border-slate-200 space-y-2 shadow-sm">
-                  <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">Cấu hình định dạng xuất bản (Import)</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setExportFormat("new")}
-                      className={`flex flex-col items-center justify-center p-2 rounded-lg border text-center transition cursor-pointer ${
-                        exportFormat === "new"
-                          ? "bg-blue-50 border-blue-500 text-blue-700 font-bold"
-                          : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100"
-                      }`}
-                    >
-                      <span className="text-xs">Định dạng mới</span>
-                      <span className="text-[9px] opacity-70 mt-0.5">Mẫu 24 cột chuẩn</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setExportFormat("old")}
-                      className={`flex flex-col items-center justify-center p-2 rounded-lg border text-center transition cursor-pointer ${
-                        exportFormat === "old"
-                          ? "bg-blue-50 border-blue-500 text-blue-700 font-bold"
-                          : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100"
-                      }`}
-                    >
-                      <span className="text-xs">Định dạng cũ</span>
-                      <span className="text-[9px] opacity-70 mt-0.5">Mẫu 26 cột & CKTM</span>
-                    </button>
-                  </div>
-                </div>
+            {/* Export Format Selector Options */}
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 space-y-2.5 shadow-2xs">
+              <span className="block text-[10px] text-slate-550 font-black uppercase tracking-wider font-sans">Cấu hình định dạng xuất bản (Import)</span>
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportFormat("new");
+                    setPreviewPage(1);
+                  }}
+                  className={`flex flex-col items-center justify-center p-2.5 rounded-lg border text-center transition cursor-pointer ${
+                    exportFormat === "new"
+                      ? "bg-blue-600 border-blue-600 text-white font-extrabold shadow-sm"
+                      : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold"
+                  }`}
+                >
+                  <span className="text-xs">Định dạng mới</span>
+                  <span className={`text-[9.5px] mt-0.5 ${exportFormat === "new" ? "text-blue-100" : "text-slate-400"}`}>Mẫu 24 cột chuẩn</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportFormat("old");
+                    setPreviewPage(1);
+                  }}
+                  className={`flex flex-col items-center justify-center p-2.5 rounded-lg border text-center transition cursor-pointer ${
+                    exportFormat === "old"
+                      ? "bg-indigo-600 border-indigo-600 text-white font-extrabold shadow-sm"
+                      : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold"
+                  }`}
+                >
+                  <span className="text-xs">Định dạng cũ</span>
+                  <span className={`text-[9.5px] mt-0.5 ${exportFormat === "old" ? "text-indigo-100" : "text-slate-400"}`}>Mẫu 26 cột & CKTM</span>
+                </button>
               </div>
+            </div>
 
+            {/* Mapping Configurations (placed directly beneath Export Format Selector) */}
+            <div className={`border rounded-xl transition-all duration-300 shadow-sm overflow-hidden flex flex-col bg-slate-50/50 ${showMapping ? 'border-blue-300 shadow-md' : 'border-slate-200'}`}>
+              {/* Collapsible Header toggle */}
               <button
-                onClick={runStep3Processing}
-                id="run-step3-mapping-btn"
-                className="w-full flex items-center justify-center space-x-2 py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-extrabold text-xs uppercase tracking-wider transition shadow-md hover:shadow-lg active:scale-[0.98] cursor-pointer"
+                type="button"
+                onClick={() => setShowMapping(!showMapping)}
+                className={`w-full p-4 flex items-center justify-between border-b transition text-left focus:outline-none cursor-pointer ${
+                  showMapping ? 'bg-blue-50/60 border-blue-200 text-blue-900' : 'bg-white border-slate-100 text-slate-750 hover:bg-slate-50/30'
+                }`}
               >
-                <span>Thực Hiện Chuyển Đổi & Tạo Import</span>
-                <ArrowRight className="h-4 w-4 animate-pulse" />
+                <div className="flex items-center space-x-2.5">
+                  <FileCheck className={`h-4.5 w-4.5 shrink-0 ${showMapping ? 'text-blue-600' : 'text-slate-500'}`} />
+                  <div>
+                    <span className="block text-xs font-black uppercase tracking-widest font-sans">MAPPING DỮ LIỆU CHUYÊN SÂU</span>
+                    <span className="block text-[10px] text-blue-600 font-bold font-sans mt-0.5 leading-normal">
+                      Hệ thống đã tự ánh xạ dữ liệu thông minh, bỏ qua nếu não không cần cấu hình lại
+                    </span>
+                    <span className="block text-[9.5px] text-slate-400 font-sans mt-1">
+                      {showMapping ? "Bấm vào để ẩn tùy chọn" : "Mặc định ẩn • Bấm để chỉnh sửa"}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <span className={`text-[9.5px] font-extrabold px-1.5 py-0.5 rounded uppercase font-mono ${showMapping ? 'bg-blue-105 text-blue-800' : 'bg-slate-100 text-slate-500'}`}>
+                    {showMapping ? "ĐANG HIỆN" : "ĐANG ẨN"}
+                  </span>
+                  <div className={`w-5.5 h-5.5 rounded-full flex items-center justify-center transition border ${showMapping ? 'bg-blue-100 text-blue-700 border-blue-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
+                    {showMapping ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                  </div>
+                </div>
               </button>
-            </div>
 
+              {/* Collapsible Input Fields Panel */}
+              <div className={`transition-all duration-250 ease-in-out ${showMapping ? 'opacity-100 p-4' : 'h-0 opacity-0 overflow-hidden'}`}>
+                {showMapping && (
+                  <div className="space-y-4">
+                    {/* Divider for output format column mappings */}
+                    <div className="space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="block text-[11px] text-slate-700 font-extrabold uppercase tracking-wide">
+                          Cấu hình chi tiết cột đầu ra ({exportFormat === "new" ? "Mẫu mới 24 cột" : "Mẫu cũ 26 cột"})
+                        </span>
+                        <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded font-mono">
+                          {exportFormat === "new" ? "A -> X" : "A -> Z"}
+                        </span>
+                      </div>
+                      
+                      <p className="text-[10px] text-slate-400 leading-normal font-sans">
+                        Danh sách tiêu đề cột thực tế trong tệp đầu ra. Bạn có thể kích chọn nguồn dữ liệu từ bảng Bước 2 (đã bóc tách thuế/giá trước thuế) cho từng cột tương ứng:
+                      </p>
+
+                      {/* Search target columns */}
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Tìm nhanh cột cần ánh xạ (ví dụ: Mã khách hàng, Địa chỉ...)"
+                          value={searchOutputColQuery}
+                          onChange={(e) => setSearchOutputColQuery(e.target.value)}
+                          className="w-full text-[10.5px] bg-white border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-slate-750 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 shadow-3xs"
+                        />
+                        <svg className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                      </div>
+
+                      {/* Available Columns grid to choose from */}
+                      <div className="bg-white rounded-lg border border-slate-200 p-2.5 max-h-[300px] overflow-y-auto space-y-2">
+                        {(() => {
+                          const sourceCols = [...availableInvoiceCols, "Thuế bán hàng", "Giá bán trước thuế", "Tiền thuế"].filter(Boolean);
+                          const activeCols = exportFormat === "new" ? NEW_FORMAT_COLS : OLD_FORMAT_COLS;
+                          
+                          const filtered = activeCols.filter((col) => {
+                            if (!searchOutputColQuery.trim()) return true;
+                            const query = searchOutputColQuery.toLowerCase();
+                            return col.name.toLowerCase().includes(query) || col.letter.toLowerCase() === query;
+                          });
+
+                          if (filtered.length === 0) {
+                            return (
+                              <div className="text-center py-4 text-[10.5px] text-slate-400">
+                                Không tìm thấy cột nào khớp với từ khóa tìm kiếm.
+                              </div>
+                            );
+                          }
+
+                          // A helper to guess default placeholders visually
+                          const getDefaultPlaceholderTextForUI = (col: any) => {
+                            const letter = col.letter;
+                            const isNew = exportFormat === "new";
+                            if (letter === "A") return "{Mặc định: Mã hóa đơn}";
+                            if (letter === "B") return "{Mặc định: Ngày hóa đơn}";
+                            if (letter === "C") return "{Mặc định: Trống}";
+                            if (letter === "D") return "{Mặc định: Trống}";
+                            if (letter === "E") return "{Mặc định: Khách lẻ...}";
+                            if (letter === "F") return "{Mặc định: Trống}";
+                            if (letter === "G" && isNew) return "{Mặc định: Trống}"; // Số CCCD
+                            if (letter === "G" && !isNew) return "{Mặc định: Trống}"; // Địa chỉ
+                            if (letter === "H" && isNew) return "{Mặc định: Trống}"; // Địa chỉ
+                            if (letter === "H" && !isNew) return "{Mặc định: Trống}"; // Số ĐT
+                            if (letter === "I" && isNew) return "{Mặc định: Trống}"; // Điện thoại
+                            if (letter === "I" && !isNew) return "{Mặc định: Trống}"; // CCCD
+                            if (letter === "J") return "{Mặc định: Trống}";
+                            if (letter === "K") return "{Mặc định: TM/CK}";
+                            if (letter === "L") return "{Mặc định: Trống}";
+                            if (letter === "M") return "{Mặc định: Mã hàng}";
+                            if (letter === "N") return "{Mặc định: Tên hàng}";
+                            
+                            if (isNew) {
+                              if (letter === "O") return "{Mặc định: Tính chất HĐ}";
+                              if (letter === "P") return "{Mặc định: Trống}";
+                              if (letter === "Q") return "{Mặc định: Số lượng}";
+                              if (letter === "R") return "{Mặc định: Đơn giá}";
+                              if (letter === "S") return "{Mặc định: Chiết khấu (%)}";
+                              if (letter === "T") return "{Mặc định: Tiền chiết khấu}";
+                              if (letter === "U") return "{Mặc định: Thành tiền}";
+                              if (letter === "V") return "{Mặc định: % VAT}";
+                              if (letter === "W") return "{Mặc định: Tiền VAT}";
+                              if (letter === "X") return "{Mặc định: Tổng tiền}";
+                            } else {
+                              if (letter === "O") return "{Mặc định: Trống}";
+                              if (letter === "P") return "{Mặc định: Đánh dấu Khuyến mại}";
+                              if (letter === "Q") return "{Mặc định: Đánh dấu CKTM}";
+                              if (letter === "R") return "{Mặc định: Trống}";
+                              if (letter === "S") return "{Mặc định: Số lượng}";
+                              if (letter === "T") return "{Mặc định: Đơn giá}";
+                              if (letter === "U") return "{Mặc định: % Chiết khấu}";
+                              if (letter === "V") return "{Mặc định: Tiền chiết khấu}";
+                              if (letter === "W") return "{Mặc định: Thành tiền}";
+                              if (letter === "X") return "{Mặc định: % VAT}";
+                              if (letter === "Y") return "{Mặc định: Tiền VAT}";
+                              if (letter === "Z") return "{Mặc định: Tổng tiền}";
+                            }
+                            return "{Mặc định: Trống}";
+                          };
+
+                          return (
+                            <div className="divide-y divide-slate-100">
+                              {filtered.map((col, idx) => {
+                                const isCustom = customExportMapping[col.name] !== undefined && customExportMapping[col.name] !== "__default__";
+                                return (
+                                  <div 
+                                    key={idx} 
+                                    className={`flex flex-col sm:flex-row sm:items-center sm:justify-between py-2 gap-2 text-xs transition duration-150 ${
+                                      isCustom ? "bg-blue-50/30 px-1 border-l-2 border-l-blue-500 rounded-sm" : ""
+                                    }`}
+                                  >
+                                    <div className="flex items-center space-x-2">
+                                      <span className={`w-6 h-6 rounded-md font-mono font-black flex items-center justify-center text-[10px] border shrink-0 ${
+                                        isCustom 
+                                          ? "bg-blue-100 text-blue-800 border-blue-250" 
+                                          : "bg-slate-100 text-slate-700 border-slate-200"
+                                      }`}>
+                                        {col.letter}
+                                      </span>
+                                      <div>
+                                        <span className="font-extrabold text-slate-750 block">{col.name}</span>
+                                        <span className="text-[9.5px] text-slate-400 font-mono block">Cột đầu ra: {col.key}</span>
+                                      </div>
+                                    </div>
+                                    
+                                    <div className="flex items-center space-x-1 sm:justify-end">
+                                      <select
+                                        value={customExportMapping[col.name] || "__default__"}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          setCustomExportMapping((prev) => ({
+                                            ...prev,
+                                            [col.name]: val,
+                                          }));
+                                        }}
+                                        className={`text-[10.5px] border rounded-md px-2 py-1 flex-1 sm:flex-initial max-w-full sm:max-w-[190px] truncate focus:outline-none ${
+                                          isCustom 
+                                            ? "bg-blue-50 border-blue-300 text-blue-900 font-bold focus:border-blue-500 focus:ring-1 focus:ring-blue-500" 
+                                            : "bg-white border-slate-200 text-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-medium"
+                                        }`}
+                                      >
+                                        <option value="__default__">{getDefaultPlaceholderTextForUI(col)}</option>
+                                        <option value="">{`{Đánh trống cell}`}</option>
+                                        {sourceCols.map((sc) => (
+                                          <option key={sc} value={sc}>
+                                            {sc}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      
+                                      {isCustom && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setCustomExportMapping((prev) => {
+                                              const copy = { ...prev };
+                                              delete copy[col.name];
+                                              return copy;
+                                            });
+                                          }}
+                                          className="text-red-500 hover:text-red-700 bg-red-55 hover:bg-red-100 p-1.5 rounded-md transition cursor-pointer"
+                                          title="Khôi phục mặc định"
+                                        >
+                                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5a1.5 1.5 0 000 3z" />
+                                          </svg>
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={runStep3Processing}
+                      id="run-step3-mapping-btn"
+                      className="w-full flex items-center justify-center space-x-2 py-3 bg-blue-600 hover:bg-blue-550 text-white rounded-lg font-extrabold text-[11px] uppercase tracking-wider transition shadow-md hover:shadow-lg active:scale-[0.98] cursor-pointer"
+                    >
+                      <span>CẬP NHẬT RULE VÀ CHUYỂN ĐỔI FILE</span>
+                      <ArrowRight className="h-4 w-4 animate-pulse shrink-0" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Step 3 XML output Preview visual table */}
@@ -1864,95 +2093,159 @@ export default function ExcelProcessor({
                     </tr>
                   </thead>
                   <tbody className="divide-y font-mono">
-                    {outputData.map((row, idx) => {
-                      const isCKTM = row["Mã hàng"].startsWith("CKTM");
-                      const currentCols = exportFormat === "new" ? NEW_FORMAT_COLS : OLD_FORMAT_COLS;
+                    {(() => {
+                      const startIndex = (previewPage - 1) * ROWS_PER_PAGE;
+                      const paginatedRows = outputData.slice(startIndex, startIndex + ROWS_PER_PAGE);
 
-                      return (
-                        <tr 
-                          key={idx} 
-                          className={`hover:bg-slate-50/80 transition ${
-                            isCKTM ? "bg-indigo-50/50 text-indigo-900 border-l-4 border-l-indigo-500" : ""
-                          } ${
-                            row["Ngày hóa đơn"] ? "border-t-2 border-slate-250 font-bold bg-slate-50/25" : ""
-                          }`}
-                        >
-                          {currentCols.map((col, colIdx) => {
-                            const val = col.customValue ? col.customValue(row) : row[col.key as keyof OutputRow];
-                            const k = col.key;
-                            let content: React.ReactNode = "-";
-                            let cellClass = "py-1.5 px-3 text-slate-700 border-r border-slate-100/60 last:border-r-0 truncate";
- 
-                            if (val !== undefined && val !== null && val !== "") {
-                              if (["Đơn giá", "Tiền chiết khấu", "Thành tiền", "Tiền VAT", "Tổng tiền *"].includes(k)) {
-                                const num = Number(val);
-                                content = !isNaN(num) ? `${num.toLocaleString("vi-VN")} đ` : String(val);
-                                cellClass += " text-right font-semibold text-slate-900";
-                              } else if (k === "Mã nhóm hóa đơn") {
-                                content = String(val);
-                                cellClass += " font-extrabold text-slate-800";
-                              } else if (k === "Mã hàng") {
-                                content = String(val);
-                                cellClass += isCKTM ? " text-indigo-650 font-bold bg-indigo-50/20" : " text-blue-650 font-bold";
-                              } else if (k === "% VAT") {
-                                content = String(val);
-                                cellClass += " text-center font-extrabold text-amber-800 bg-amber-50/10";
-                              } else if (k === "Số lượng") {
-                                content = String(val);
-                                cellClass += " text-center font-extrabold text-slate-900";
-                              } else {
-                                content = String(val);
-                                if (k === "Tên khách hàng" || k === "Tên hàng hóa, dịch vụ *") {
-                                  cellClass += " font-sans text-slate-800";
+                      return paginatedRows.map((row, idx) => {
+                        const actualIdx = startIndex + idx;
+                        const isCKTM = row["Mã hàng"].startsWith("CKTM");
+                        const currentCols = exportFormat === "new" ? NEW_FORMAT_COLS : OLD_FORMAT_COLS;
+
+                        return (
+                          <tr 
+                            key={actualIdx} 
+                            className={`hover:bg-slate-50/80 transition ${
+                              isCKTM ? "bg-indigo-50/50 text-indigo-900 border-l-4 border-l-indigo-500" : ""
+                            } ${
+                              row["Ngày hóa đơn"] ? "border-t-2 border-slate-250 font-bold bg-slate-50/25" : ""
+                            }`}
+                          >
+                            {currentCols.map((col, colIdx) => {
+                              const val = col.customValue ? col.customValue(row) : row[col.key as keyof OutputRow];
+                              const k = col.key;
+                              let content: React.ReactNode = "-";
+                              let cellClass = "py-1.5 px-3 text-slate-700 border-r border-slate-100/60 last:border-r-0 truncate";
+   
+                              if (val !== undefined && val !== null && val !== "") {
+                                if (["Đơn giá", "Tiền chiết khấu", "Thành tiền", "Tiền VAT", "Tổng tiền *"].includes(k)) {
+                                  const num = Number(val);
+                                  content = !isNaN(num) ? `${num.toLocaleString("vi-VN")} đ` : String(val);
+                                  cellClass += " text-right font-semibold text-slate-900";
+                                } else if (k === "Mã nhóm hóa đơn") {
+                                  content = String(val);
+                                  cellClass += " font-extrabold text-slate-800";
+                                } else if (k === "Mã hàng") {
+                                  content = String(val);
+                                  cellClass += isCKTM ? " text-indigo-650 font-bold bg-indigo-50/20" : " text-blue-650 font-bold";
+                                } else if (k === "% VAT") {
+                                  content = String(val);
+                                  cellClass += " text-center font-extrabold text-amber-800 bg-amber-50/10";
+                                } else if (k === "Số lượng") {
+                                  content = String(val);
+                                  cellClass += " text-center font-extrabold text-slate-900";
                                 } else {
-                                  cellClass += " font-sans";
+                                  content = String(val);
+                                  if (k === "Tên khách hàng" || k === "Tên hàng hóa, dịch vụ *") {
+                                    cellClass += " font-sans text-slate-800";
+                                  } else {
+                                    cellClass += " font-sans";
+                                  }
                                 }
                               }
-                            }
- 
-                            return (
-                              <td key={colIdx} className={cellClass} title={String(val || "")}>
-                                {content}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
+   
+                              return (
+                                <td key={colIdx} className={cellClass} title={String(val || "")}>
+                                  {content}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      });
+                    })()}
                   </tbody>
                 </table>
               </div>
+
+              {/* Preview Pagination Controls */}
+              {outputData.length > ROWS_PER_PAGE && (
+                <div className="bg-slate-50 border-t border-slate-200 px-5 py-3 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-inner">
+                  <div className="text-xs text-slate-500">
+                    Hiển thị từ <span className="font-bold text-slate-800">{((previewPage - 1) * ROWS_PER_PAGE) + 1}</span> đến{" "}
+                    <span className="font-bold text-slate-800">
+                      {Math.min(previewPage * ROWS_PER_PAGE, outputData.length)}
+                    </span>{" "}
+                    trên tổng số <span className="font-bold text-slate-800">{outputData.length}</span> dòng kết quả
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      disabled={previewPage === 1}
+                      onClick={() => setPreviewPage((prev) => Math.max(prev - 1, 1))}
+                      className="px-3 py-1.5 rounded-lg border border-slate-250 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition shadow-xs"
+                    >
+                      Trang trước
+                    </button>
+                    <span className="text-xs text-slate-600 font-bold bg-slate-100 px-2.5 py-1 rounded-md border border-slate-200">
+                      Trang {previewPage} / {Math.ceil(outputData.length / ROWS_PER_PAGE)}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={previewPage >= Math.ceil(outputData.length / ROWS_PER_PAGE)}
+                      onClick={() => setPreviewPage((prev) => Math.min(prev + 1, Math.ceil(outputData.length / ROWS_PER_PAGE)))}
+                      className="px-3 py-1.5 rounded-lg border border-slate-250 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition shadow-xs"
+                    >
+                      Trang sau
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
       {/* Unified processing details log trails */}
-      <div className="bg-slate-900 rounded-xl border border-slate-950 p-4 shadow-inner text-[11px] font-mono text-slate-350 space-y-2">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-2 text-slate-400">
-          <span className="flex items-center space-x-1.5 font-bold uppercase tracking-wider text-[10px]">
+      <div className={`bg-slate-900 rounded-xl border border-slate-950 shadow-lg mt-6 overflow-hidden transition-all duration-300 ${showLogs ? 'ring-1 ring-blue-500/50' : ''}`}>
+        {/* Toggle Header Bar */}
+        <div
+          onClick={() => setShowLogs(!showLogs)}
+          className="flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-900/80 cursor-pointer transition select-none border-b border-slate-800"
+        >
+          <div className="flex items-center space-x-2.5">
             <RefreshCcw className="h-3.5 w-3.5 animate-spin-slow text-blue-500 shrink-0" />
-            <span>Hệ Thống Phân Tích & Ghi Nhật Ký (Audit Trail Logs)</span>
-          </span>
-          <button 
-            onClick={() => setProcessingLogs([])}
-            className="hover:text-white transition text-[10px] underline cursor-pointer"
-          >
-            Xóa lịch sử log
-          </button>
+            <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-slate-300">
+              Hệ Thống Phân Tích & Ghi Nhật Ký (Audit Trail Logs)
+            </span>
+            <span className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded font-mono ${showLogs ? 'bg-blue-950 text-blue-400 border border-blue-900' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
+              {showLogs ? 'HIỆN LOGS' : 'ẨN LOGS • BẤM ĐỂ MỞ'}
+            </span>
+          </div>
+          
+          <div className="flex items-center space-x-3" onClick={(e) => e.stopPropagation()}>
+            {showLogs && (
+              <button 
+                onClick={() => setProcessingLogs([])}
+                className="hover:text-white text-slate-400 transition text-[10px] underline cursor-pointer font-mono"
+              >
+                Xóa lịch sử log
+              </button>
+            )}
+            <div 
+              onClick={() => setShowLogs(!showLogs)}
+              className="w-5 h-5 rounded bg-slate-800 text-slate-400 flex items-center justify-center cursor-pointer hover:bg-slate-700 border border-slate-700"
+            >
+              {showLogs ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            </div>
+          </div>
         </div>
         
-        <div className="max-h-24 overflow-y-auto space-y-1">
-          {processingLogs.length === 0 ? (
-            <div className="text-slate-500 italic py-2">Hệ thống đang hoạt động ổn định. Đang chờ tác vụ nạp tệp ...</div>
-          ) : (
-            processingLogs.map((log, i) => (
-              <div key={i} className="py-0.5 border-b border-slate-800/20 last:border-none">
-                {log}
-              </div>
-            ))
-          )}
-        </div>
+        {/* Collapsible content */}
+        {showLogs && (
+          <div className="p-4 text-[11px] font-mono text-slate-350 space-y-2 max-h-40 overflow-y-auto bg-slate-900 animate-slide-down">
+            {processingLogs.length === 0 ? (
+              <div className="text-slate-500 italic py-2">Hệ thống đang hoạt động ổn định. Đang chờ tác vụ nạp tệp ...</div>
+            ) : (
+              processingLogs.map((log, i) => (
+                <div key={i} className="py-1 border-b border-slate-800/20 last:border-none">
+                  {log}
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
